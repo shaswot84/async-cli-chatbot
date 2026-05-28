@@ -181,6 +181,7 @@ class ChatStore:
         total_tokens: int | None,
         error_type: str | None = None,
         error_message: str | None = None,
+        retry_attempt: int = 0,
     ) -> None:
         prompt_text = serialize_messages(messages)
         response_chars = len(response_content) if response_content is not None else None
@@ -220,7 +221,7 @@ class ChatStore:
                         id, request_id, failure_kind, status_code, message,
                         retry_attempt, created_at
                     )
-                    VALUES (?, ?, ?, ?, ?, 0, ?)
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         f"fail_{uuid.uuid4().hex}",
@@ -228,6 +229,7 @@ class ChatStore:
                         error_type,
                         status_code,
                         error_message,
+                        retry_attempt,
                         utc_now(),
                     ),
                 )

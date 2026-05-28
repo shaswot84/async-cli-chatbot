@@ -42,6 +42,10 @@ Inside the REPL:
 /model set <model_id>
 /history
 /request <request_id>
+/fail on
+/fail off
+/fail rate <0.0-1.0>
+/fail kind <429|500|timeout|malformed_json|empty_response|slow_response>
 /clear
 /exit
 ```
@@ -61,3 +65,12 @@ api_failures   conversations  llm_requests  messages
 Phase 4 emits structured logs during `make dev`. Each chat turn includes JSON log
 events with request ID, conversation ID, model, latency, status, and token metadata
 without API keys or raw prompts.
+
+Phase 5 protects free-tier usage with a semaphore, RPM limiter, timeout policy,
+retry policy, and runtime failure simulation:
+
+```text
+/fail on
+/fail rate 0.5
+/fail kind 429
+```

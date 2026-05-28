@@ -37,6 +37,9 @@ class AppConfig:
     sqlite_path: Path
     log_level: str
     log_json: bool
+    simulate_failures: bool
+    simulate_failure_rate: float
+    simulate_failure_kind: str
     models: dict[str, ModelConfig]
 
     def chat_url(self) -> str:
@@ -135,6 +138,9 @@ def load_config(models_path: Path = DEFAULT_MODELS_PATH) -> AppConfig:
         sqlite_path=env_path("SQLITE_PATH", PROJECT_ROOT / "data" / "chatbot.sqlite3"),
         log_level=env_str("LOG_LEVEL", "INFO").upper(),
         log_json=env_bool("LOG_JSON", True),
+        simulate_failures=env_bool("SIMULATE_FAILURES", False),
+        simulate_failure_rate=env_ratio("SIMULATE_FAILURE_RATE", 0.0),
+        simulate_failure_kind=env_str("SIMULATE_FAILURE_KIND", "429"),
         models=models,
     )
 
@@ -168,6 +174,9 @@ def sanitized_config(config: AppConfig) -> dict[str, str | int | float | bool]:
         "sqlite_path": str(config.sqlite_path),
         "log_level": config.log_level,
         "log_json": config.log_json,
+        "simulate_failures": config.simulate_failures,
+        "simulate_failure_rate": config.simulate_failure_rate,
+        "simulate_failure_kind": config.simulate_failure_kind,
     }
 
 
@@ -187,3 +196,16 @@ def env_bool(name: str, default: bool) -> bool:
     if normalized in {"0", "false", "no", "off"}:
         return False
     raise ValueError(f"{name} must be true or false")
+
+
+def env_ratio(name: str, default: float) -> float:
+    raw = os.environ.get(name, str(default)).strip()
+    try:
+        value = float(raw)
+    except ValueError as exc:
+        raise ValueError(f"{name} must be a number") from exc
+    if value < 0:
+        raise ValueError(f"{name} cannot be negative")
+    if value > 1:
+        raise ValueError(f"{name} must be between 0.0 and 1.0")
+    return value

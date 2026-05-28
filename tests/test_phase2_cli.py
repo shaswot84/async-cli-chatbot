@@ -14,6 +14,9 @@ def test_command_name_handles_model_subcommands() -> None:
     assert command_name("/model list") == "/model list"
     assert command_name("/model set llama-3.1-8b-instant") == "/model set"
     assert command_name("/request req_123") == "/request"
+    assert command_name("/fail on") == "/fail"
+    assert command_name("/fail rate 0.5") == "/fail rate"
+    assert command_name("/fail kind timeout") == "/fail kind"
     assert command_name("/exit") == "/exit"
 
 
@@ -46,6 +49,9 @@ use_case = "unit tests"
     monkeypatch.setenv("DEFAULT_MODEL", "test-model")
     monkeypatch.setenv("MAX_OUTPUT_TOKENS", "400")
     monkeypatch.setenv("SQLITE_PATH", str(tmp_path / "chatbot.sqlite3"))
+    monkeypatch.setenv("SIMULATE_FAILURES", "true")
+    monkeypatch.setenv("SIMULATE_FAILURE_RATE", "0.5")
+    monkeypatch.setenv("SIMULATE_FAILURE_KIND", "timeout")
 
     config = load_config(models_path)
 
@@ -53,6 +59,9 @@ use_case = "unit tests"
     assert config.chat_url() == "https://example.test/api/v1/chat/completions"
     assert config.max_output_tokens == 400
     assert config.sqlite_path == tmp_path / "chatbot.sqlite3"
+    assert config.simulate_failures is True
+    assert config.simulate_failure_rate == 0.5
+    assert config.simulate_failure_kind == "timeout"
 
 
 def test_session_switches_and_clears_models(

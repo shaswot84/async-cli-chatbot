@@ -11,6 +11,7 @@ from rich.table import Table
 
 from ai_chatbot.config import AppConfig, load_config, sanitized_config
 from ai_chatbot.db import ChatStore, request_to_rows
+from ai_chatbot.failure_simulator import FailureSimulator, supported_failure_kinds
 from ai_chatbot.llm_client import LLMClient, LLMClientError
 from ai_chatbot.logging_setup import setup_logging
 from ai_chatbot.session import ChatSession
@@ -42,8 +43,13 @@ async def run_repl(debug: bool = False) -> None:
     await store.initialize()
     conversation_id = await store.start_conversation(config.default_model)
     session = ChatSession(config, conversation_id=conversation_id)
-    client = LLMClient(config)
-    commands = command_handlers(config, session, store)
+    failure_simulator = FailureSimulator(
+        enabled=config.simulate_failures,
+        rate=config.simulate_failure_rate,
+        kind=config.simulate_failure_kind,
+    )
+    client = LLMClient(config, failure_simulator)
+    commands = command_handlers(config, session, store, failure_simulator)
     logger.info(
         "chat_session_started",
         extra={
@@ -109,7 +115,8 @@ async def run_repl(debug: bool = False) -> None:
             if debug:
                 token_text = (
                     f"tokens in/out/total: "
-                    f"{response.input_tokens}/{response.output_tokens}/{response.total_tokens}"
+                    f"{response.input_tokens}/{response.output_tokens}/{response.total_tokens}; "
+                    f"retries: {response.retry_attempts}"
                 )
                 console.print(f"[dim]{response.request_id} · {token_text}[/]")
     finally:
@@ -125,11 +132,18 @@ def command_name(raw: str) -> str:
     parts = raw.split()
     if len(parts) >= 2 and parts[0] == "/model":
         return " ".join(parts[:2])
+    if len(parts) >= 2 and parts[0] == "/fail" and parts[1] in {"rate", "kind"}:
+        return " ".join(parts[:2])
+    if parts and parts[0] == "/fail":
+        return "/fail"
     return parts[0]
 
 
 def command_handlers(
-    config: AppConfig, session: ChatSession, store: ChatStore
+    config: AppConfig,
+    session: ChatSession,
+    store: ChatStore,
+    failure_simulator: FailureSimulator,
 ) -> dict[str, Callable[[str], Awaitable[bool]]]:
     return {
         "/help": lambda _: async_value(print_help()),
@@ -140,6 +154,9 @@ def command_handlers(
         "/model set": lambda raw: async_value(set_model(raw, session)),
         "/history": lambda _: print_history(session, store),
         "/request": lambda raw: print_request(raw, store),
+        "/fail": lambda raw: async_value(set_failure_enabled(raw, failure_simulator)),
+        "/fail rate": lambda raw: async_value(set_failure_rate(raw, failure_simulator)),
+        "/fail kind": lambda raw: async_value(set_failure_kind(raw, failure_simulator)),
         "/clear": lambda _: async_value(clear_history(session)),
         "/config": lambda _: async_value(print_config(config)),
     }
@@ -161,6 +178,10 @@ def print_help() -> bool:
         ("/config", "Show sanitized runtime config"),
         ("/history", "Show persisted conversation messages"),
         ("/request <request_id>", "Show SQLite request metadata"),
+        ("/fail on", "Enable simulated failures"),
+        ("/fail off", "Disable simulated failures"),
+        ("/fail rate <0.0-1.0>", "Set simulated failure probability"),
+        ("/fail kind <kind>", "Set simulated failure kind"),
         ("/clear", "Clear in-memory conversation"),
         ("/exit", "Quit"),
     ]
@@ -203,6 +224,52 @@ def set_model(raw: str, session: ChatSession) -> bool:
         console.print(f"[red]{exc}[/]")
         return True
     console.print(f"Switched to [cyan]{session.active_model}[/]")
+    return True
+
+
+def set_failure_enabled(raw: str, failure_simulator: FailureSimulator) -> bool:
+    parts = raw.split(maxsplit=1)
+    if len(parts) < 2 or parts[1] not in {"on", "off"}:
+        console.print("[yellow]Usage:[/] /fail on | /fail off")
+        return True
+    if parts[1] == "on":
+        failure_simulator.enable()
+        console.print(
+            f"Failure simulation on: rate={failure_simulator.rate}, kind={failure_simulator.kind}"
+        )
+    else:
+        failure_simulator.disable()
+        console.print("[dim]Failure simulation off.[/]")
+    return True
+
+
+def set_failure_rate(raw: str, failure_simulator: FailureSimulator) -> bool:
+    parts = raw.split(maxsplit=2)
+    if len(parts) < 3:
+        console.print("[yellow]Usage:[/] /fail rate <0.0-1.0>")
+        return True
+    try:
+        failure_simulator.set_rate(float(parts[2]))
+    except ValueError as exc:
+        console.print(f"[red]{exc}[/]")
+        return True
+    console.print(f"Failure simulation rate: {failure_simulator.rate}")
+    return True
+
+
+def set_failure_kind(raw: str, failure_simulator: FailureSimulator) -> bool:
+    parts = raw.split(maxsplit=2)
+    if len(parts) < 3:
+        console.print(
+            f"[yellow]Usage:[/] /fail kind <{', '.join(sorted(supported_failure_kinds()))}>"
+        )
+        return True
+    try:
+        failure_simulator.set_kind(parts[2])
+    except ValueError as exc:
+        console.print(f"[red]{exc}[/]")
+        return True
+    console.print(f"Failure simulation kind: {failure_simulator.kind}")
     return True
 
 

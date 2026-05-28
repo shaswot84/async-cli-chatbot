@@ -67,6 +67,7 @@ class ChatSession:
                 total_tokens=None,
                 error_type=exc.error_type,
                 error_message=str(exc),
+                retry_attempt=exc.retry_attempts,
             )
             logger.warning(
                 "llm_request_failed_persisted",
@@ -77,6 +78,7 @@ class ChatSession:
                     "latency_ms": exc.latency_ms,
                     "status_code": exc.status_code,
                     "error_type": exc.error_type,
+                    "retry_attempts": exc.retry_attempts,
                 },
             )
             raise
@@ -103,6 +105,7 @@ class ChatSession:
                 "model": response.model,
                 "latency_ms": response.latency_ms,
                 "status_code": response.status_code,
+                "retry_attempts": response.retry_attempts,
             },
         )
         self.history.append({"role": "assistant", "content": response.content})
