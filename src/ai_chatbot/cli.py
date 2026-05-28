@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from collections.abc import Awaitable, Callable
 
 import typer
@@ -11,10 +12,12 @@ from rich.table import Table
 from ai_chatbot.config import AppConfig, load_config, sanitized_config
 from ai_chatbot.db import ChatStore, request_to_rows
 from ai_chatbot.llm_client import LLMClient, LLMClientError
+from ai_chatbot.logging_setup import setup_logging
 from ai_chatbot.session import ChatSession
 
 app = typer.Typer(add_completion=False, help="Asynchronous command-line AI chatbot.")
 console = Console()
+logger = logging.getLogger(__name__)
 
 
 @app.callback(invoke_without_command=True)
@@ -34,12 +37,22 @@ async def run_repl(debug: bool = False) -> None:
         console.print(f"[red]Configuration error:[/] {exc}")
         raise typer.Exit(2) from exc
 
+    setup_logging(config.log_level, config.log_json)
     store = ChatStore(config.sqlite_path)
     await store.initialize()
     conversation_id = await store.start_conversation(config.default_model)
     session = ChatSession(config, conversation_id=conversation_id)
     client = LLMClient(config)
     commands = command_handlers(config, session, store)
+    logger.info(
+        "chat_session_started",
+        extra={
+            "conversation_id": conversation_id,
+            "default_model": config.default_model,
+            "sqlite_path": str(config.sqlite_path),
+            "debug": debug,
+        },
+    )
 
     console.print(
         Panel.fit(
@@ -56,6 +69,10 @@ async def run_repl(debug: bool = False) -> None:
                 user_input = console.input(f"[bold cyan]{session.active_model}>[/] ").strip()
             except (EOFError, KeyboardInterrupt):
                 console.print("\n[dim]Bye.[/]")
+                logger.info(
+                    "chat_session_interrupted",
+                    extra={"conversation_id": conversation_id},
+                )
                 break
 
             if not user_input:
@@ -72,6 +89,17 @@ async def run_repl(debug: bool = False) -> None:
                 with console.status("Thinking...", spinner="dots"):
                     response = await session.send(client, store, user_input)
             except LLMClientError as exc:
+                logger.warning(
+                    "chat_turn_failed",
+                    extra={
+                        "request_id": exc.request_id,
+                        "conversation_id": conversation_id,
+                        "model": exc.model,
+                        "latency_ms": exc.latency_ms,
+                        "status_code": exc.status_code,
+                        "error_type": exc.error_type,
+                    },
+                )
                 console.print(f"[red]Request failed:[/] {exc}")
                 continue
 
@@ -87,6 +115,10 @@ async def run_repl(debug: bool = False) -> None:
     finally:
         await client.close()
         await store.end_conversation(conversation_id)
+        logger.info(
+            "chat_session_ended",
+            extra={"conversation_id": conversation_id},
+        )
 
 
 def command_name(raw: str) -> str:

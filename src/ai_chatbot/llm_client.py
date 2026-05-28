@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import time
 import uuid
 from dataclasses import dataclass
@@ -10,6 +11,7 @@ import httpx
 from ai_chatbot.config import AppConfig
 
 Message = dict[str, str]
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -55,6 +57,16 @@ class LLMClient:
         self._config.validate_model(model)
         request_id = f"req_{uuid.uuid4().hex}"
         started = time.perf_counter()
+        prompt_chars = sum(len(message.get("content", "")) for message in messages)
+
+        logger.info(
+            "llm_request_started",
+            extra={
+                "request_id": request_id,
+                "model": model,
+                "prompt_chars": prompt_chars,
+            },
+        )
 
         try:
             response = await self._client.post(
@@ -73,34 +85,77 @@ class LLMClient:
             latency_ms = round((time.perf_counter() - started) * 1000, 2)
             response.raise_for_status()
         except httpx.HTTPStatusError as exc:
+            latency_ms = round((time.perf_counter() - started) * 1000, 2)
+            logger.warning(
+                "llm_request_failed",
+                extra={
+                    "request_id": request_id,
+                    "model": model,
+                    "latency_ms": latency_ms,
+                    "status_code": exc.response.status_code,
+                    "error_type": "http",
+                },
+            )
             raise LLMClientError(
                 f"Provider returned HTTP {exc.response.status_code} for request {request_id}",
                 request_id=request_id,
                 model=model,
-                latency_ms=round((time.perf_counter() - started) * 1000, 2),
+                latency_ms=latency_ms,
                 status_code=exc.response.status_code,
                 error_type="http",
             ) from exc
         except httpx.TimeoutException as exc:
+            latency_ms = round((time.perf_counter() - started) * 1000, 2)
+            logger.warning(
+                "llm_request_failed",
+                extra={
+                    "request_id": request_id,
+                    "model": model,
+                    "latency_ms": latency_ms,
+                    "status_code": None,
+                    "error_type": "timeout",
+                },
+            )
             raise LLMClientError(
                 f"Request {request_id} timed out",
                 request_id=request_id,
                 model=model,
-                latency_ms=round((time.perf_counter() - started) * 1000, 2),
+                latency_ms=latency_ms,
                 error_type="timeout",
             ) from exc
         except httpx.HTTPError as exc:
+            latency_ms = round((time.perf_counter() - started) * 1000, 2)
+            logger.warning(
+                "llm_request_failed",
+                extra={
+                    "request_id": request_id,
+                    "model": model,
+                    "latency_ms": latency_ms,
+                    "status_code": None,
+                    "error_type": "network",
+                },
+            )
             raise LLMClientError(
                 f"Request {request_id} failed: {exc.__class__.__name__}",
                 request_id=request_id,
                 model=model,
-                latency_ms=round((time.perf_counter() - started) * 1000, 2),
+                latency_ms=latency_ms,
                 error_type="network",
             ) from exc
 
         payload = response.json()
         content = extract_content(payload)
         if not content:
+            logger.warning(
+                "llm_request_failed",
+                extra={
+                    "request_id": request_id,
+                    "model": model,
+                    "latency_ms": latency_ms,
+                    "status_code": response.status_code,
+                    "error_type": "schema",
+                },
+            )
             raise LLMClientError(
                 f"Request {request_id} returned an empty assistant response",
                 request_id=request_id,
@@ -111,6 +166,19 @@ class LLMClient:
             )
 
         usage = payload.get("usage") or {}
+        logger.info(
+            "llm_request_completed",
+            extra={
+                "request_id": request_id,
+                "model": model,
+                "latency_ms": latency_ms,
+                "status_code": response.status_code,
+                "response_chars": len(content),
+                "input_tokens": as_optional_int(usage.get("prompt_tokens")),
+                "output_tokens": as_optional_int(usage.get("completion_tokens")),
+                "total_tokens": as_optional_int(usage.get("total_tokens")),
+            },
+        )
         return ChatResponse(
             request_id=request_id,
             model=model,

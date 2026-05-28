@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -11,6 +12,8 @@ from typing import Any
 import aiosqlite
 
 from ai_chatbot.llm_client import Message
+
+logger = logging.getLogger(__name__)
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS conversations (
@@ -92,6 +95,10 @@ class ChatStore:
         async with aiosqlite.connect(self.sqlite_path) as db:
             await db.executescript(SCHEMA)
             await db.commit()
+        logger.info(
+            "db_initialized",
+            extra={"sqlite_path": str(self.sqlite_path)},
+        )
 
     async def start_conversation(self, default_model: str) -> str:
         conversation_id = f"conv_{uuid.uuid4().hex}"
@@ -104,6 +111,14 @@ class ChatStore:
                 (conversation_id, utc_now(), default_model),
             )
             await db.commit()
+        logger.info(
+            "db_write_completed",
+            extra={
+                "table": "conversations",
+                "operation": "insert",
+                "conversation_id": conversation_id,
+            },
+        )
         return conversation_id
 
     async def end_conversation(self, conversation_id: str) -> None:
@@ -113,6 +128,14 @@ class ChatStore:
                 (utc_now(), conversation_id),
             )
             await db.commit()
+        logger.info(
+            "db_write_completed",
+            extra={
+                "table": "conversations",
+                "operation": "update",
+                "conversation_id": conversation_id,
+            },
+        )
 
     async def add_message(
         self, conversation_id: str, role: str, content: str, model: str | None = None
@@ -127,6 +150,18 @@ class ChatStore:
                 (message_id, conversation_id, role, content, model, utc_now()),
             )
             await db.commit()
+        logger.info(
+            "db_write_completed",
+            extra={
+                "table": "messages",
+                "operation": "insert",
+                "message_id": message_id,
+                "conversation_id": conversation_id,
+                "role": role,
+                "model": model,
+                "content_chars": len(content),
+            },
+        )
         return message_id
 
     async def record_llm_request(
@@ -197,6 +232,19 @@ class ChatStore:
                     ),
                 )
             await db.commit()
+        logger.info(
+            "db_write_completed",
+            extra={
+                "table": "llm_requests",
+                "operation": "insert",
+                "request_id": request_id,
+                "conversation_id": conversation_id,
+                "model": model,
+                "status_code": status_code,
+                "success": success,
+                "latency_ms": latency_ms,
+            },
+        )
 
     async def list_messages(self, conversation_id: str) -> list[dict[str, str | None]]:
         async with aiosqlite.connect(self.sqlite_path) as db:

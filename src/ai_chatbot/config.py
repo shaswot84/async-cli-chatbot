@@ -35,6 +35,8 @@ class AppConfig:
     requests_per_minute: int
     max_output_tokens: int
     sqlite_path: Path
+    log_level: str
+    log_json: bool
     models: dict[str, ModelConfig]
 
     def chat_url(self) -> str:
@@ -131,6 +133,8 @@ def load_config(models_path: Path = DEFAULT_MODELS_PATH) -> AppConfig:
         ),
         max_output_tokens=env_int("MAX_OUTPUT_TOKENS", 400),
         sqlite_path=env_path("SQLITE_PATH", PROJECT_ROOT / "data" / "chatbot.sqlite3"),
+        log_level=env_str("LOG_LEVEL", "INFO").upper(),
+        log_json=env_bool("LOG_JSON", True),
         models=models,
     )
 
@@ -162,6 +166,8 @@ def sanitized_config(config: AppConfig) -> dict[str, str | int | float | bool]:
         "requests_per_minute": config.requests_per_minute,
         "max_output_tokens": config.max_output_tokens,
         "sqlite_path": str(config.sqlite_path),
+        "log_level": config.log_level,
+        "log_json": config.log_json,
     }
 
 
@@ -169,3 +175,15 @@ def env_path(name: str, default: Path) -> Path:
     raw = os.environ.get(name)
     path = Path(raw.strip()) if raw and raw.strip() else default
     return path if path.is_absolute() else PROJECT_ROOT / path
+
+
+def env_bool(name: str, default: bool) -> bool:
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    normalized = raw.strip().lower()
+    if normalized in {"1", "true", "yes", "on"}:
+        return True
+    if normalized in {"0", "false", "no", "off"}:
+        return False
+    raise ValueError(f"{name} must be true or false")

@@ -57,3 +57,7 @@ Expected tables:
 ```text
 api_failures   conversations  llm_requests  messages
 ```
+
+Phase 4 emits structured logs during `make dev`. Each chat turn includes JSON log
+events with request ID, conversation ID, model, latency, status, and token metadata
+without API keys or raw prompts.
