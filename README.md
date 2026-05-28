@@ -27,3 +27,20 @@ reports/api_key_preflight_report.md
 reports/api_key_preflight_raw.json
 ```
 
+## Phase 2 CLI
+
+```bash
+make run
+```
+
+Inside the REPL:
+
+```text
+/help
+/model list
+/model current
+/model set <model_id>
+/history
+/clear
+/exit
+```

@@ -1,10 +1,16 @@
-.PHONY: install lock preflight preflight-basic preflight-models preflight-rate preflight-report test lint fmt typecheck clean
+.PHONY: install lock run dev preflight preflight-basic preflight-models preflight-rate preflight-report test lint fmt typecheck clean
 
 install:
 	uv sync
 
 lock:
 	uv lock
+
+run:
+	uv run ai-chatbot
+
+dev:
+	uv run ai-chatbot --debug
 
 preflight:
 	uv run python scripts/api_key_probe.py --suite all
@@ -31,8 +37,7 @@ fmt:
 	uv run ruff format .
 
 typecheck:
-	uv run mypy scripts tests
+	uv run mypy
 
 clean:
 	rm -rf .pytest_cache .ruff_cache .mypy_cache dist build reports/*.json reports/*.md
-

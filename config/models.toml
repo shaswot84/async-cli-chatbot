@@ -8,7 +8,7 @@ chat_completions_path = "/chat/completions"
 model = "llama-3.1-8b-instant"
 timeout_seconds = 60
 max_concurrency = 2
-requests_per_minute = 20
+requests_per_minute = 6
 
 [models."gpt-4.1-mini"]
 display_name = "GPT 4.1 Mini"
@@ -39,4 +39,3 @@ use_case = "strong open model reasoning"
 display_name = "Groq Compound Mini"
 family = "compound"
 use_case = "fast agentic/tool-style responses"
-
