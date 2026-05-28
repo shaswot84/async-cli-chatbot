@@ -1,0 +1,42 @@
+[provider]
+name = "multi-llm-router"
+base_url_env = "LLM_BASE_URL"
+api_key_env = "LLM_API_KEY"
+chat_completions_path = "/chat/completions"
+
+[defaults]
+model = "llama-3.1-8b-instant"
+timeout_seconds = 60
+max_concurrency = 2
+requests_per_minute = 20
+
+[models."gpt-4.1-mini"]
+display_name = "GPT 4.1 Mini"
+family = "openai"
+use_case = "balanced reasoning and coding"
+
+[models."gemini-3.5-flash"]
+display_name = "Gemini 3.5 Flash"
+family = "gemini"
+use_case = "fast general chat"
+
+[models."llama-3.1-8b-instant"]
+display_name = "Llama 3.1 8B Instant"
+family = "llama"
+use_case = "fast free-tier default"
+
+[models."sarvam-m"]
+display_name = "Sarvam M"
+family = "sarvam"
+use_case = "Indian-language focused workflows"
+
+[models."qwen/qwen3-32b"]
+display_name = "Qwen3 32B"
+family = "qwen"
+use_case = "strong open model reasoning"
+
+[models."groq/compound-mini"]
+display_name = "Groq Compound Mini"
+family = "compound"
+use_case = "fast agentic/tool-style responses"
+
