@@ -27,7 +27,7 @@ def make_config() -> Any:
             timeout_seconds=60,
             max_concurrency=2,
             requests_per_minute=20,
-            max_tokens=64,
+            max_tokens=400,
             temperature=0.0,
             safe_requests_per_minute=6,
             burst_concurrency=2,
