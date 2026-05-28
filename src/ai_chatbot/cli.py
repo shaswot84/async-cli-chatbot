@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 
 import typer
 from rich.console import Console
@@ -9,6 +9,7 @@ from rich.panel import Panel
 from rich.table import Table
 
 from ai_chatbot.config import AppConfig, load_config, sanitized_config
+from ai_chatbot.db import ChatStore, request_to_rows
 from ai_chatbot.llm_client import LLMClient, LLMClientError
 from ai_chatbot.session import ChatSession
 
@@ -33,11 +34,19 @@ async def run_repl(debug: bool = False) -> None:
         console.print(f"[red]Configuration error:[/] {exc}")
         raise typer.Exit(2) from exc
 
-    session = ChatSession(config)
+    store = ChatStore(config.sqlite_path)
+    await store.initialize()
+    conversation_id = await store.start_conversation(config.default_model)
+    session = ChatSession(config, conversation_id=conversation_id)
     client = LLMClient(config)
-    commands = command_handlers(config, session)
+    commands = command_handlers(config, session, store)
 
-    console.print(Panel.fit("Async CLI AI Chatbot\nType /help for commands.", title="Ready"))
+    console.print(
+        Panel.fit(
+            f"Async CLI AI Chatbot\nConversation: {conversation_id}\nType /help for commands.",
+            title="Ready",
+        )
+    )
     if debug:
         print_config(config)
 
@@ -52,7 +61,7 @@ async def run_repl(debug: bool = False) -> None:
             if not user_input:
                 continue
             if user_input.startswith("/"):
-                should_continue = commands.get(command_name(user_input), unknown_command)(
+                should_continue = await commands.get(command_name(user_input), unknown_command)(
                     user_input
                 )
                 if not should_continue:
@@ -61,7 +70,7 @@ async def run_repl(debug: bool = False) -> None:
 
             try:
                 with console.status("Thinking...", spinner="dots"):
-                    response = await session.send(client, user_input)
+                    response = await session.send(client, store, user_input)
             except LLMClientError as exc:
                 console.print(f"[red]Request failed:[/] {exc}")
                 continue
@@ -77,6 +86,7 @@ async def run_repl(debug: bool = False) -> None:
                 console.print(f"[dim]{response.request_id} · {token_text}[/]")
     finally:
         await client.close()
+        await store.end_conversation(conversation_id)
 
 
 def command_name(raw: str) -> str:
@@ -86,18 +96,25 @@ def command_name(raw: str) -> str:
     return parts[0]
 
 
-def command_handlers(config: AppConfig, session: ChatSession) -> dict[str, Callable[[str], bool]]:
+def command_handlers(
+    config: AppConfig, session: ChatSession, store: ChatStore
+) -> dict[str, Callable[[str], Awaitable[bool]]]:
     return {
-        "/help": lambda _: print_help(),
-        "/exit": lambda _: False,
-        "/quit": lambda _: False,
-        "/model list": lambda _: print_models(config, session),
-        "/model current": lambda _: print_current_model(session),
-        "/model set": lambda raw: set_model(raw, session),
-        "/history": lambda _: print_history(session),
-        "/clear": lambda _: clear_history(session),
-        "/config": lambda _: print_config(config),
+        "/help": lambda _: async_value(print_help()),
+        "/exit": lambda _: async_value(False),
+        "/quit": lambda _: async_value(False),
+        "/model list": lambda _: async_value(print_models(config, session)),
+        "/model current": lambda _: async_value(print_current_model(session)),
+        "/model set": lambda raw: async_value(set_model(raw, session)),
+        "/history": lambda _: print_history(session, store),
+        "/request": lambda raw: print_request(raw, store),
+        "/clear": lambda _: async_value(clear_history(session)),
+        "/config": lambda _: async_value(print_config(config)),
     }
+
+
+async def async_value(value: bool) -> bool:
+    return value
 
 
 def print_help() -> bool:
@@ -110,7 +127,8 @@ def print_help() -> bool:
         ("/model current", "Show active model"),
         ("/model set <model_id>", "Switch active model"),
         ("/config", "Show sanitized runtime config"),
-        ("/history", "Show in-memory conversation"),
+        ("/history", "Show persisted conversation messages"),
+        ("/request <request_id>", "Show SQLite request metadata"),
         ("/clear", "Clear in-memory conversation"),
         ("/exit", "Quit"),
     ]
@@ -156,13 +174,34 @@ def set_model(raw: str, session: ChatSession) -> bool:
     return True
 
 
-def print_history(session: ChatSession) -> bool:
-    if not session.history:
+async def print_history(session: ChatSession, store: ChatStore) -> bool:
+    messages = await store.list_messages(session.conversation_id)
+    if not messages:
         console.print("[dim]No messages yet.[/]")
         return True
-    for index, message in enumerate(session.history, start=1):
+    for index, message in enumerate(messages, start=1):
         role = message["role"]
-        console.print(Panel(message["content"], title=f"{index}. {role}"))
+        console.print(Panel(message["content"] or "", title=f"{index}. {role}"))
+    return True
+
+
+async def print_request(raw: str, store: ChatStore) -> bool:
+    parts = raw.split(maxsplit=1)
+    if len(parts) < 2:
+        console.print("[yellow]Usage:[/] /request <request_id>")
+        return True
+
+    request = await store.get_request(parts[1])
+    if request is None:
+        console.print(f"[yellow]No request found for:[/] {parts[1]}")
+        return True
+
+    table = Table(title="LLM Request")
+    table.add_column("Field", style="cyan")
+    table.add_column("Value")
+    for key, value in request_to_rows(request):
+        table.add_row(key, "" if value is None else str(value))
+    console.print(table)
     return True
 
 
@@ -182,6 +221,6 @@ def print_config(config: AppConfig) -> bool:
     return True
 
 
-def unknown_command(raw: str) -> bool:
+async def unknown_command(raw: str) -> bool:
     console.print(f"[yellow]Unknown command:[/] {raw}. Try /help.")
     return True

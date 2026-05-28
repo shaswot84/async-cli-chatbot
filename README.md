@@ -41,6 +41,19 @@ Inside the REPL:
 /model current
 /model set <model_id>
 /history
+/request <request_id>
 /clear
 /exit
+```
+
+Phase 3 persists conversations, messages, request metadata, and failures in SQLite:
+
+```bash
+sqlite3 data/chatbot.sqlite3 ".tables"
+```
+
+Expected tables:
+
+```text
+api_failures   conversations  llm_requests  messages
 ```

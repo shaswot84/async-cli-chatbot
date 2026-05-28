@@ -18,13 +18,29 @@ class ChatResponse:
     model: str
     content: str
     latency_ms: float
+    status_code: int
     input_tokens: int | None
     output_tokens: int | None
     total_tokens: int | None
 
 
 class LLMClientError(RuntimeError):
-    pass
+    def __init__(
+        self,
+        message: str,
+        *,
+        request_id: str,
+        model: str,
+        latency_ms: float,
+        status_code: int | None = None,
+        error_type: str = "provider_error",
+    ) -> None:
+        super().__init__(message)
+        self.request_id = request_id
+        self.model = model
+        self.latency_ms = latency_ms
+        self.status_code = status_code
+        self.error_type = error_type
 
 
 class LLMClient:
@@ -58,17 +74,41 @@ class LLMClient:
             response.raise_for_status()
         except httpx.HTTPStatusError as exc:
             raise LLMClientError(
-                f"Provider returned HTTP {exc.response.status_code} for request {request_id}"
+                f"Provider returned HTTP {exc.response.status_code} for request {request_id}",
+                request_id=request_id,
+                model=model,
+                latency_ms=round((time.perf_counter() - started) * 1000, 2),
+                status_code=exc.response.status_code,
+                error_type="http",
             ) from exc
         except httpx.TimeoutException as exc:
-            raise LLMClientError(f"Request {request_id} timed out") from exc
+            raise LLMClientError(
+                f"Request {request_id} timed out",
+                request_id=request_id,
+                model=model,
+                latency_ms=round((time.perf_counter() - started) * 1000, 2),
+                error_type="timeout",
+            ) from exc
         except httpx.HTTPError as exc:
-            raise LLMClientError(f"Request {request_id} failed: {exc.__class__.__name__}") from exc
+            raise LLMClientError(
+                f"Request {request_id} failed: {exc.__class__.__name__}",
+                request_id=request_id,
+                model=model,
+                latency_ms=round((time.perf_counter() - started) * 1000, 2),
+                error_type="network",
+            ) from exc
 
         payload = response.json()
         content = extract_content(payload)
         if not content:
-            raise LLMClientError(f"Request {request_id} returned an empty assistant response")
+            raise LLMClientError(
+                f"Request {request_id} returned an empty assistant response",
+                request_id=request_id,
+                model=model,
+                latency_ms=latency_ms,
+                status_code=response.status_code,
+                error_type="schema",
+            )
 
         usage = payload.get("usage") or {}
         return ChatResponse(
@@ -76,6 +116,7 @@ class LLMClient:
             model=model,
             content=content,
             latency_ms=latency_ms,
+            status_code=response.status_code,
             input_tokens=as_optional_int(usage.get("prompt_tokens")),
             output_tokens=as_optional_int(usage.get("completion_tokens")),
             total_tokens=as_optional_int(usage.get("total_tokens")),

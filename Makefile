@@ -1,4 +1,4 @@
-.PHONY: install lock run dev preflight preflight-basic preflight-models preflight-rate preflight-report test lint fmt typecheck clean
+.PHONY: install lock run dev preflight preflight-basic preflight-models preflight-rate preflight-report test lint fmt typecheck db-reset clean
 
 install:
 	uv sync
@@ -38,6 +38,9 @@ fmt:
 
 typecheck:
 	uv run mypy
+
+db-reset:
+	rm -f data/chatbot.sqlite3
 
 clean:
 	rm -rf .pytest_cache .ruff_cache .mypy_cache dist build reports/*.json reports/*.md

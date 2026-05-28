@@ -34,6 +34,7 @@ class AppConfig:
     max_concurrency: int
     requests_per_minute: int
     max_output_tokens: int
+    sqlite_path: Path
     models: dict[str, ModelConfig]
 
     def chat_url(self) -> str:
@@ -129,6 +130,7 @@ def load_config(models_path: Path = DEFAULT_MODELS_PATH) -> AppConfig:
             "REQUESTS_PER_MINUTE", int(defaults_data.get("requests_per_minute", 6))
         ),
         max_output_tokens=env_int("MAX_OUTPUT_TOKENS", 400),
+        sqlite_path=env_path("SQLITE_PATH", PROJECT_ROOT / "data" / "chatbot.sqlite3"),
         models=models,
     )
 
@@ -159,4 +161,11 @@ def sanitized_config(config: AppConfig) -> dict[str, str | int | float | bool]:
         "max_concurrency": config.max_concurrency,
         "requests_per_minute": config.requests_per_minute,
         "max_output_tokens": config.max_output_tokens,
+        "sqlite_path": str(config.sqlite_path),
     }
+
+
+def env_path(name: str, default: Path) -> Path:
+    raw = os.environ.get(name)
+    path = Path(raw.strip()) if raw and raw.strip() else default
+    return path if path.is_absolute() else PROJECT_ROOT / path
