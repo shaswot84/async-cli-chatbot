@@ -1,3 +1,5 @@
+"""Application configuration loaded from TOML files and environment variables."""
+
 from __future__ import annotations
 
 import os
@@ -12,6 +14,8 @@ DEFAULT_MODELS_PATH = PROJECT_ROOT / "config" / "models.toml"
 
 @dataclass(frozen=True)
 class ProviderConfig:
+    """Connection details for an OpenAI-compatible LLM provider."""
+
     name: str
     base_url: str
     api_key: str
@@ -20,6 +24,8 @@ class ProviderConfig:
 
 @dataclass(frozen=True)
 class ModelConfig:
+    """Metadata for a single model listed in models.toml."""
+
     model_id: str
     display_name: str
     family: str
@@ -28,6 +34,8 @@ class ModelConfig:
 
 @dataclass(frozen=True)
 class AppConfig:
+    """All runtime configuration for the chatbot application."""
+
     provider: ProviderConfig
     default_model: str
     timeout_seconds: float
@@ -43,17 +51,20 @@ class AppConfig:
     models: dict[str, ModelConfig]
 
     def chat_url(self) -> str:
+        """Build the full chat completions endpoint URL from base URL and path."""
         base = self.provider.base_url.rstrip("/") + "/"
         path = self.provider.chat_completions_path.lstrip("/")
         return urljoin(base, path)
 
     def validate_model(self, model_id: str) -> None:
+        """Raise ValueError if the given model_id is not in the configured models."""
         if model_id not in self.models:
             available = ", ".join(self.models)
             raise ValueError(f"Unknown model `{model_id}`. Available models: {available}")
 
 
 def load_dotenv(path: Path = PROJECT_ROOT / ".env") -> None:
+    """Load key=value pairs from a .env file, skipping already-set variables."""
     if not path.exists():
         return
 
@@ -66,6 +77,7 @@ def load_dotenv(path: Path = PROJECT_ROOT / ".env") -> None:
 
 
 def env_str(name: str, default: str | None = None) -> str:
+    """Read a required string environment variable, raising on missing or empty."""
     value = os.environ.get(name, default)
     if value is None or not value.strip():
         raise ValueError(f"Missing required environment variable: {name}")
@@ -73,6 +85,7 @@ def env_str(name: str, default: str | None = None) -> str:
 
 
 def env_int(name: str, default: int) -> int:
+    """Read a positive integer environment variable."""
     raw = os.environ.get(name, str(default)).strip()
     try:
         value = int(raw)
@@ -84,6 +97,7 @@ def env_int(name: str, default: int) -> int:
 
 
 def env_float(name: str, default: float) -> float:
+    """Read a positive float environment variable."""
     raw = os.environ.get(name, str(default)).strip()
     try:
         value = float(raw)
@@ -95,6 +109,7 @@ def env_float(name: str, default: float) -> float:
 
 
 def load_config(models_path: Path = DEFAULT_MODELS_PATH) -> AppConfig:
+    """Load and validate the full application configuration from env and TOML."""
     load_dotenv()
 
     with models_path.open("rb") as models_file:
@@ -149,6 +164,7 @@ def load_config(models_path: Path = DEFAULT_MODELS_PATH) -> AppConfig:
 
 
 def validate_config(config: AppConfig) -> None:
+    """Validate essential config fields; raises ValueError on the first problem."""
     parsed = urlparse(config.provider.base_url)
     if parsed.scheme not in {"http", "https"} or not parsed.netloc:
         raise ValueError("LLM_BASE_URL must be an absolute HTTP(S) URL")
@@ -160,6 +176,7 @@ def validate_config(config: AppConfig) -> None:
 
 
 def sanitized_config(config: AppConfig) -> dict[str, str | int | float | bool]:
+    """Return a copy of the config safe for display (no API key, no full URL)."""
     parsed = urlparse(config.provider.base_url)
     return {
         "provider": config.provider.name,
@@ -181,12 +198,14 @@ def sanitized_config(config: AppConfig) -> dict[str, str | int | float | bool]:
 
 
 def env_path(name: str, default: Path) -> Path:
+    """Read an env var as a filesystem path, resolving relative paths against project root."""
     raw = os.environ.get(name)
     path = Path(raw.strip()) if raw and raw.strip() else default
     return path if path.is_absolute() else PROJECT_ROOT / path
 
 
 def env_bool(name: str, default: bool) -> bool:
+    """Read a boolean environment variable (true/false, 1/0, yes/no, on/off)."""
     raw = os.environ.get(name)
     if raw is None:
         return default
@@ -199,6 +218,7 @@ def env_bool(name: str, default: bool) -> bool:
 
 
 def env_ratio(name: str, default: float) -> float:
+    """Read a float env var clamped to [0.0, 1.0]."""
     raw = os.environ.get(name, str(default)).strip()
     try:
         value = float(raw)

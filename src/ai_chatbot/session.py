@@ -1,3 +1,5 @@
+"""In-memory conversation session that orchestrates chat turns and persistence."""
+
 from __future__ import annotations
 
 import logging
@@ -12,6 +14,8 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class ChatSession:
+    """Holds conversation state: active model, message history, and conversation ID."""
+
     config: AppConfig
     conversation_id: str
     active_model: str = field(init=False)
@@ -21,6 +25,7 @@ class ChatSession:
         self.active_model = self.config.default_model
 
     def set_model(self, model_id: str) -> None:
+        """Switch the active model, validating it exists in config first."""
         previous_model = self.active_model
         self.config.validate_model(model_id)
         self.active_model = model_id
@@ -34,9 +39,11 @@ class ChatSession:
         )
 
     def clear(self) -> None:
+        """Drop all in-memory message history."""
         self.history.clear()
 
     async def send(self, client: LLMClient, store: ChatStore, content: str) -> ChatResponse:
+        """Send a user message to the LLM, persist both sides, return the response."""
         logger.info(
             "chat_user_message_received",
             extra={

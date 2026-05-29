@@ -1,3 +1,5 @@
+"""SQLite persistence for conversations, messages, LLM requests, and API failures."""
+
 from __future__ import annotations
 
 import hashlib
@@ -68,6 +70,8 @@ CREATE TABLE IF NOT EXISTS api_failures (
 
 @dataclass(frozen=True)
 class StoredRequest:
+    """A single row from the llm_requests table."""
+
     id: str
     conversation_id: str
     model: str
@@ -87,10 +91,13 @@ class StoredRequest:
 
 
 class ChatStore:
+    """Async SQLite-backed store for conversations, messages, and request telemetry."""
+
     def __init__(self, sqlite_path: Path) -> None:
         self.sqlite_path = sqlite_path
 
     async def initialize(self) -> None:
+        """Create the database directory and schema if they don't exist."""
         self.sqlite_path.parent.mkdir(parents=True, exist_ok=True)
         async with aiosqlite.connect(self.sqlite_path) as db:
             await db.executescript(SCHEMA)
@@ -101,6 +108,7 @@ class ChatStore:
         )
 
     async def start_conversation(self, default_model: str) -> str:
+        """Insert a new conversation row and return its ID."""
         conversation_id = f"conv_{uuid.uuid4().hex}"
         async with aiosqlite.connect(self.sqlite_path) as db:
             await db.execute(
@@ -122,6 +130,7 @@ class ChatStore:
         return conversation_id
 
     async def end_conversation(self, conversation_id: str) -> None:
+        """Set the ended_at timestamp on a conversation."""
         async with aiosqlite.connect(self.sqlite_path) as db:
             await db.execute(
                 "UPDATE conversations SET ended_at = ? WHERE id = ?",
@@ -140,6 +149,7 @@ class ChatStore:
     async def add_message(
         self, conversation_id: str, role: str, content: str, model: str | None = None
     ) -> str:
+        """Insert a single chat message and return its ID."""
         message_id = f"msg_{uuid.uuid4().hex}"
         async with aiosqlite.connect(self.sqlite_path) as db:
             await db.execute(
@@ -183,6 +193,7 @@ class ChatStore:
         error_message: str | None = None,
         retry_attempt: int = 0,
     ) -> None:
+        """Persist an LLM request and, on failure, a corresponding api_failures row."""
         prompt_text = serialize_messages(messages)
         response_chars = len(response_content) if response_content is not None else None
         async with aiosqlite.connect(self.sqlite_path) as db:
@@ -249,6 +260,7 @@ class ChatStore:
         )
 
     async def list_messages(self, conversation_id: str) -> list[dict[str, str | None]]:
+        """Return all messages for a conversation in chronological order."""
         async with aiosqlite.connect(self.sqlite_path) as db:
             db.row_factory = aiosqlite.Row
             cursor = await db.execute(
@@ -264,6 +276,7 @@ class ChatStore:
         return [dict(row) for row in rows]
 
     async def get_request(self, request_id: str) -> StoredRequest | None:
+        """Look up a single LLM request by ID, or None if not found."""
         async with aiosqlite.connect(self.sqlite_path) as db:
             db.row_factory = aiosqlite.Row
             cursor = await db.execute(
@@ -299,18 +312,22 @@ class ChatStore:
 
 
 def utc_now() -> str:
+    """Return the current UTC time as an ISO-8601 string."""
     return datetime.now(UTC).isoformat()
 
 
 def serialize_messages(messages: list[Message]) -> str:
+    """Serialize a list of chat messages to a deterministic JSON string."""
     return json.dumps(messages, sort_keys=True, separators=(",", ":"))
 
 
 def prompt_hash(prompt_text: str) -> str:
+    """Return the SHA-256 hex digest of a serialized prompt."""
     return hashlib.sha256(prompt_text.encode("utf-8")).hexdigest()
 
 
 def request_to_rows(request: StoredRequest) -> list[tuple[str, Any]]:
+    """Flatten a StoredRequest into key-value pairs for display."""
     return [
         ("request_id", request.id),
         ("conversation_id", request.conversation_id),

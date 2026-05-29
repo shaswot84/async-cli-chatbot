@@ -1,3 +1,5 @@
+"""Typer CLI application providing the interactive chat REPL and slash commands."""
+
 from __future__ import annotations
 
 import asyncio
@@ -26,12 +28,14 @@ def main(
     ctx: typer.Context,
     debug: bool = typer.Option(False, "--debug", help="Show sanitized runtime config on start."),
 ) -> None:
+    """Entry point: start the interactive REPL when no subcommand is given."""
     if ctx.invoked_subcommand is not None:
         return
     asyncio.run(run_repl(debug=debug))
 
 
 async def run_repl(debug: bool = False) -> None:
+    """Set up dependencies and run the read-eval-print loop."""
     try:
         config = load_config()
     except ValueError as exc:
@@ -129,6 +133,7 @@ async def run_repl(debug: bool = False) -> None:
 
 
 def command_name(raw: str) -> str:
+    """Parse a slash command and optional sub-command from raw user input."""
     parts = raw.split()
     if len(parts) >= 2 and parts[0] == "/model":
         return " ".join(parts[:2])
@@ -145,6 +150,7 @@ def command_handlers(
     store: ChatStore,
     failure_simulator: FailureSimulator,
 ) -> dict[str, Callable[[str], Awaitable[bool]]]:
+    """Build a dispatch table mapping command strings to async handlers."""
     return {
         "/help": lambda _: async_value(print_help()),
         "/exit": lambda _: async_value(False),
@@ -163,10 +169,12 @@ def command_handlers(
 
 
 async def async_value(value: bool) -> bool:
+    """Wrap a synchronous bool return value into an awaitable."""
     return value
 
 
 def print_help() -> bool:
+    """Render the help table of available slash commands."""
     table = Table(title="Commands")
     table.add_column("Command", style="cyan")
     table.add_column("Action")
@@ -192,6 +200,7 @@ def print_help() -> bool:
 
 
 def print_models(config: AppConfig, session: ChatSession) -> bool:
+    """Render a table of configured models with the active one marked."""
     table = Table(title="Configured Models")
     table.add_column("Active")
     table.add_column("Model ID", style="cyan")
@@ -209,11 +218,13 @@ def print_models(config: AppConfig, session: ChatSession) -> bool:
 
 
 def print_current_model(session: ChatSession) -> bool:
+    """Print the currently active model ID."""
     console.print(f"Current model: [cyan]{session.active_model}[/]")
     return True
 
 
 def set_model(raw: str, session: ChatSession) -> bool:
+    """Parse '/model set <id>' and switch the active model."""
     parts = raw.split(maxsplit=2)
     if len(parts) < 3:
         console.print("[yellow]Usage:[/] /model set <model_id>")
@@ -228,6 +239,7 @@ def set_model(raw: str, session: ChatSession) -> bool:
 
 
 def set_failure_enabled(raw: str, failure_simulator: FailureSimulator) -> bool:
+    """Parse '/fail on|off' and toggle failure simulation."""
     parts = raw.split(maxsplit=1)
     if len(parts) < 2 or parts[1] not in {"on", "off"}:
         console.print("[yellow]Usage:[/] /fail on | /fail off")
@@ -244,6 +256,7 @@ def set_failure_enabled(raw: str, failure_simulator: FailureSimulator) -> bool:
 
 
 def set_failure_rate(raw: str, failure_simulator: FailureSimulator) -> bool:
+    """Parse '/fail rate <0.0-1.0>' and update the failure probability."""
     parts = raw.split(maxsplit=2)
     if len(parts) < 3:
         console.print("[yellow]Usage:[/] /fail rate <0.0-1.0>")
@@ -258,6 +271,7 @@ def set_failure_rate(raw: str, failure_simulator: FailureSimulator) -> bool:
 
 
 def set_failure_kind(raw: str, failure_simulator: FailureSimulator) -> bool:
+    """Parse '/fail kind <kind>' and update the failure kind."""
     parts = raw.split(maxsplit=2)
     if len(parts) < 3:
         console.print(
@@ -274,6 +288,7 @@ def set_failure_kind(raw: str, failure_simulator: FailureSimulator) -> bool:
 
 
 async def print_history(session: ChatSession, store: ChatStore) -> bool:
+    """Fetch and display all persisted messages for the current conversation."""
     messages = await store.list_messages(session.conversation_id)
     if not messages:
         console.print("[dim]No messages yet.[/]")
@@ -285,6 +300,7 @@ async def print_history(session: ChatSession, store: ChatStore) -> bool:
 
 
 async def print_request(raw: str, store: ChatStore) -> bool:
+    """Parse '/request <id>' and display the stored LLM request metadata."""
     parts = raw.split(maxsplit=1)
     if len(parts) < 2:
         console.print("[yellow]Usage:[/] /request <request_id>")
@@ -305,12 +321,14 @@ async def print_request(raw: str, store: ChatStore) -> bool:
 
 
 def clear_history(session: ChatSession) -> bool:
+    """Clear the in-memory conversation history."""
     session.clear()
     console.print("[dim]History cleared.[/]")
     return True
 
 
 def print_config(config: AppConfig) -> bool:
+    """Render a table of the current sanitized runtime configuration."""
     table = Table(title="Runtime Config")
     table.add_column("Setting", style="cyan")
     table.add_column("Value")
@@ -321,5 +339,6 @@ def print_config(config: AppConfig) -> bool:
 
 
 async def unknown_command(raw: str) -> bool:
+    """Handle unrecognized slash commands."""
     console.print(f"[yellow]Unknown command:[/] {raw}. Try /help.")
     return True

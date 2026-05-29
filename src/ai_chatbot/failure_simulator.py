@@ -1,3 +1,5 @@
+"""Simulated provider failures for resilience testing."""
+
 from __future__ import annotations
 
 import asyncio
@@ -11,6 +13,8 @@ logger = logging.getLogger(__name__)
 
 
 class SimulatedProviderError(RuntimeError):
+    """Error raised when the failure simulator triggers an artificial failure."""
+
     def __init__(self, kind: str, status_code: int | None = None) -> None:
         super().__init__(f"simulated provider failure: {kind}")
         self.kind = kind
@@ -19,11 +23,14 @@ class SimulatedProviderError(RuntimeError):
 
 @dataclass
 class FailureSimulator:
+    """Configurable failure injection for testing retry and error-handling paths."""
+
     enabled: bool = False
     rate: float = 0.0
     kind: str = "429"
 
     def enable(self) -> None:
+        """Turn on failure simulation."""
         self.enabled = True
         logger.info(
             "failure_simulation_enabled",
@@ -31,6 +38,7 @@ class FailureSimulator:
         )
 
     def disable(self) -> None:
+        """Turn off failure simulation."""
         self.enabled = False
         logger.info(
             "failure_simulation_enabled",
@@ -38,6 +46,7 @@ class FailureSimulator:
         )
 
     def set_rate(self, rate: float) -> None:
+        """Set the probability (0.0-1.0) that a request triggers a failure."""
         if not 0 <= rate <= 1:
             raise ValueError("failure simulation rate must be between 0.0 and 1.0")
         self.rate = rate
@@ -47,6 +56,7 @@ class FailureSimulator:
         )
 
     def set_kind(self, kind: str) -> None:
+        """Set the kind of failure to simulate (429, 500, timeout, etc.)."""
         if kind not in supported_failure_kinds():
             raise ValueError(f"unsupported failure kind `{kind}`")
         self.kind = kind
@@ -56,6 +66,7 @@ class FailureSimulator:
         )
 
     async def maybe_fail(self, request_id: str, model: str) -> None:
+        """Optionally raise or delay based on the configured rate and kind."""
         if not self.enabled or self.rate <= 0 or random.random() >= self.rate:
             return
 
@@ -84,4 +95,5 @@ class FailureSimulator:
 
 
 def supported_failure_kinds() -> set[str]:
+    """Return the set of failure kinds that can be simulated."""
     return {"429", "500", "timeout", "malformed_json", "empty_response", "slow_response"}

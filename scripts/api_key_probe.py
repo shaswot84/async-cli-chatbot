@@ -1,3 +1,5 @@
+"""Phase 1 API-key feasibility probe: smoke-test provider access and recommend safe limits."""
+
 from __future__ import annotations
 
 import argparse
@@ -28,6 +30,8 @@ STOP_STATUS_CODES = {401, 403}
 
 @dataclass(frozen=True)
 class ProviderConfig:
+    """Connection details for an OpenAI-compatible LLM provider."""
+
     name: str
     base_url: str
     api_key: str
@@ -36,6 +40,8 @@ class ProviderConfig:
 
 @dataclass(frozen=True)
 class PreflightSettings:
+    """Tunable parameters that control the preflight probe behaviour."""
+
     default_model: str
     timeout_seconds: float
     max_concurrency: int
@@ -50,16 +56,20 @@ class PreflightSettings:
 
 @dataclass(frozen=True)
 class RuntimeConfig:
+    """Top-level configuration bundling provider, settings, and model list."""
+
     provider: ProviderConfig
     settings: PreflightSettings
     models: list[str]
 
 
 def utc_now() -> str:
+    """Return the current UTC time as an ISO-8601 string."""
     return datetime.now(UTC).isoformat()
 
 
 def load_dotenv(path: Path) -> None:
+    """Load key=value pairs from a .env file, skipping already-set variables."""
     if not path.exists():
         return
 
@@ -74,6 +84,7 @@ def load_dotenv(path: Path) -> None:
 
 
 def env_str(name: str, default: str | None = None) -> str:
+    """Read a required string environment variable, raising on missing or empty."""
     value = os.environ.get(name, default)
     if value is None or not value.strip():
         raise ValueError(f"Missing required environment variable: {name}")
@@ -81,6 +92,7 @@ def env_str(name: str, default: str | None = None) -> str:
 
 
 def env_int(name: str, default: int) -> int:
+    """Read a positive integer environment variable."""
     raw = os.environ.get(name, str(default)).strip()
     try:
         value = int(raw)
@@ -92,6 +104,7 @@ def env_int(name: str, default: int) -> int:
 
 
 def env_float(name: str, default: float) -> float:
+    """Read a non-negative float environment variable."""
     raw = os.environ.get(name, str(default)).strip()
     try:
         value = float(raw)
@@ -103,6 +116,7 @@ def env_float(name: str, default: float) -> float:
 
 
 def load_runtime_config(config_path: Path = DEFAULT_CONFIG_PATH) -> RuntimeConfig:
+    """Load and validate the full runtime config from .env and models.toml."""
     load_dotenv(PROJECT_ROOT / ".env")
 
     with config_path.open("rb") as config_file:
@@ -154,6 +168,7 @@ def load_runtime_config(config_path: Path = DEFAULT_CONFIG_PATH) -> RuntimeConfi
 
 
 def sanitized_url(url: str) -> str:
+    """Return only the scheme://host portion of a URL, or 'invalid-url'."""
     parsed = urlparse(url)
     if not parsed.scheme or not parsed.netloc:
         return "invalid-url"
@@ -161,6 +176,7 @@ def sanitized_url(url: str) -> str:
 
 
 def validate_config(config: RuntimeConfig) -> list[str]:
+    """Check the runtime config for obvious problems; returns a list of error messages."""
     errors: list[str] = []
     parsed = urlparse(config.provider.base_url)
 
@@ -179,12 +195,14 @@ def validate_config(config: RuntimeConfig) -> list[str]:
 
 
 def chat_url(config: RuntimeConfig) -> str:
+    """Build the full chat completions endpoint URL."""
     base = config.provider.base_url.rstrip("/") + "/"
     path = config.provider.chat_completions_path.lstrip("/")
     return urljoin(base, path)
 
 
 def classify_failure(status_code: int | None, error_type: str | None = None) -> str:
+    """Categorise a failure as retryable, non_retryable, or unknown."""
     if error_type in {"timeout", "network"}:
         return "retryable"
     if status_code in RETRYABLE_STATUS_CODES:
@@ -201,6 +219,7 @@ def classify_failure(status_code: int | None, error_type: str | None = None) -> 
 
 
 def sanitize_error_message(message: str, config: RuntimeConfig | None = None) -> str:
+    """Redact API keys and base URLs from an error message, truncating to 300 chars."""
     sanitized = message
     if config is not None:
         secret_values = [
@@ -215,6 +234,7 @@ def sanitize_error_message(message: str, config: RuntimeConfig | None = None) ->
 
 
 def parse_openai_response(payload: dict[str, Any]) -> dict[str, Any]:
+    """Extract content, tokens, and compatibility flags from an OpenAI-style response."""
     content = ""
     try:
         content = payload["choices"][0]["message"]["content"]
@@ -238,6 +258,7 @@ def parse_openai_response(payload: dict[str, Any]) -> dict[str, Any]:
 
 
 def build_payload(model: str, prompt: str, max_tokens: int, temperature: float) -> dict[str, Any]:
+    """Build an OpenAI-compatible chat completion request body."""
     return {
         "model": model,
         "messages": [{"role": "user", "content": prompt}],
@@ -253,6 +274,7 @@ async def tiny_chat_request(
     prompt: str = "Reply with exactly: ok",
     max_tokens: int | None = None,
 ) -> dict[str, Any]:
+    """Send a single tiny chat request and return a normalised result dict."""
     request_id = f"req_{uuid.uuid4().hex}"
     started = time.perf_counter()
     status_code: int | None = None
@@ -318,6 +340,7 @@ def failed_result(
     message: str,
     config: RuntimeConfig,
 ) -> dict[str, Any]:
+    """Build a normalised failure result dict for a request that threw an exception."""
     return {
         "request_id": request_id,
         "model_id": model,
@@ -332,6 +355,7 @@ def failed_result(
 
 
 async def run_basic(config: RuntimeConfig) -> dict[str, Any]:
+    """Run a single smoke test against the default model."""
     errors = validate_config(config)
     result: dict[str, Any] = {
         "name": "basic",
@@ -359,6 +383,7 @@ async def run_basic(config: RuntimeConfig) -> dict[str, Any]:
 
 
 async def run_models(config: RuntimeConfig) -> dict[str, Any]:
+    """Probe every configured model; stop early on auth errors or repeated 429s."""
     timeout = httpx.Timeout(config.settings.timeout_seconds)
     results: list[dict[str, Any]] = []
     async with httpx.AsyncClient(timeout=timeout) as client:
@@ -379,6 +404,7 @@ async def run_models(config: RuntimeConfig) -> dict[str, Any]:
 
 
 async def run_latency(config: RuntimeConfig, working_models: list[str]) -> dict[str, Any]:
+    """Collect latency stats (min, avg, p95) for each working model."""
     timeout = httpx.Timeout(config.settings.timeout_seconds)
     model_stats: list[dict[str, Any]] = []
     async with httpx.AsyncClient(timeout=timeout) as client:
@@ -399,6 +425,7 @@ async def run_latency(config: RuntimeConfig, working_models: list[str]) -> dict[
 
 
 async def run_rate_limit(config: RuntimeConfig) -> dict[str, Any]:
+    """Test concurrency limits and sustained request rate."""
     timeout = httpx.Timeout(config.settings.timeout_seconds)
     async with httpx.AsyncClient(timeout=timeout) as client:
         concurrency_results = []
@@ -474,6 +501,7 @@ async def run_rate_limit(config: RuntimeConfig) -> dict[str, Any]:
 
 
 def percentile_95(values: list[float]) -> float | None:
+    """Compute the 95th percentile of a list of floats, or None if empty."""
     if not values:
         return None
     if len(values) < 2:
@@ -482,6 +510,7 @@ def percentile_95(values: list[float]) -> float | None:
 
 
 def sanitized_config(config: RuntimeConfig) -> dict[str, Any]:
+    """Return a copy of the config safe for display (no API key, no full URL)."""
     return {
         "provider_name": config.provider.name,
         "provider_base_url": sanitized_url(config.provider.base_url),
@@ -502,6 +531,7 @@ def sanitized_config(config: RuntimeConfig) -> dict[str, Any]:
 def recommended_default_model(
     config: RuntimeConfig, model_results: list[dict[str, Any]]
 ) -> str | None:
+    """Pick the best default model: current if it passed, otherwise fastest successful one."""
     successful = [result for result in model_results if result["success"]]
     if any(result["model_id"] == config.settings.default_model for result in successful):
         return config.settings.default_model
@@ -511,6 +541,7 @@ def recommended_default_model(
 
 
 def recommended_concurrency(rate_result: dict[str, Any] | None) -> int | None:
+    """Recommend the highest concurrency level that had zero failures."""
     if not rate_result:
         return None
     passing = [
@@ -522,6 +553,7 @@ def recommended_concurrency(rate_result: dict[str, Any] | None) -> int | None:
 
 
 def recommended_rpm(config: RuntimeConfig, rate_result: dict[str, Any] | None) -> int | None:
+    """Recommend a safe requests-per-minute based on the rate-limit probe results."""
     if not rate_result:
         return None
     rpm = rate_result.get("rpm", {})
@@ -531,6 +563,7 @@ def recommended_rpm(config: RuntimeConfig, rate_result: dict[str, Any] | None) -
 
 
 def decision(config: RuntimeConfig, report: dict[str, Any]) -> tuple[str, list[str], str]:
+    """Classify the probe results as GO, GO WITH WARNINGS, or NO-GO."""
     model_results = report.get("models", {}).get("results", [])
     default_result = next(
         (item for item in model_results if item.get("model_id") == config.settings.default_model),
@@ -571,6 +604,7 @@ def decision(config: RuntimeConfig, report: dict[str, Any]) -> tuple[str, list[s
 
 
 def build_report(config: RuntimeConfig, results: dict[str, Any]) -> dict[str, Any]:
+    """Assemble the final preflight report with recommendations and a go/no-go decision."""
     model_results = results.get("models", {}).get("results", [])
     rate_result = results.get("rate-limit")
     status, reasons, next_action = decision(config, results)
@@ -593,6 +627,7 @@ def build_report(config: RuntimeConfig, results: dict[str, Any]) -> dict[str, An
 
 
 def write_reports(report: dict[str, Any], markdown_path: Path) -> None:
+    """Write the preflight report as both raw JSON and rendered Markdown."""
     markdown_path.parent.mkdir(parents=True, exist_ok=True)
     DEFAULT_RAW_REPORT_PATH.parent.mkdir(parents=True, exist_ok=True)
     DEFAULT_RAW_REPORT_PATH.write_text(
@@ -602,6 +637,7 @@ def write_reports(report: dict[str, Any], markdown_path: Path) -> None:
 
 
 def render_markdown(report: dict[str, Any]) -> str:
+    """Render the preflight report as a Markdown string."""
     config = report["sanitized_config"]
     model_results = report.get("models", {}).get("results", [])
     passed = [item["model_id"] for item in model_results if item.get("success")]
@@ -668,6 +704,7 @@ def render_markdown(report: dict[str, Any]) -> str:
 
 
 async def run_suite(suite: str, config: RuntimeConfig) -> dict[str, Any]:
+    """Run one or all preflight probe suites and return collected results."""
     results: dict[str, Any] = {}
 
     if suite in {"all", "basic"}:
@@ -695,6 +732,7 @@ async def run_suite(suite: str, config: RuntimeConfig) -> dict[str, Any]:
 
 
 def print_existing_report() -> int:
+    """Print the most recent preflight Markdown report to stdout."""
     report_path = PROJECT_ROOT / "reports" / "api_key_preflight_report.md"
     if not report_path.exists():
         print("No preflight report found. Run `make preflight` first.", file=sys.stderr)
@@ -704,6 +742,7 @@ def print_existing_report() -> int:
 
 
 async def async_main(args: argparse.Namespace) -> int:
+    """Async entry point: load config, run probes, write reports, and print results."""
     if args.suite == "report":
         return print_existing_report()
 
@@ -722,6 +761,7 @@ async def async_main(args: argparse.Namespace) -> int:
 
 
 def parse_args() -> argparse.Namespace:
+    """Parse CLI arguments for the preflight probe."""
     parser = argparse.ArgumentParser(description="Phase 1 API-key feasibility probe")
     parser.add_argument(
         "--suite",
@@ -738,6 +778,7 @@ def parse_args() -> argparse.Namespace:
 
 
 def main() -> int:
+    """Synchronous entry point for the preflight probe script."""
     return asyncio.run(async_main(parse_args()))
 
 

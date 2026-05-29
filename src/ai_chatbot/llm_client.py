@@ -1,3 +1,5 @@
+"""Async HTTP client for OpenAI-compatible chat completions with retries and rate limiting."""
+
 from __future__ import annotations
 
 import asyncio
@@ -21,6 +23,8 @@ MAX_RETRY_ATTEMPTS = 3
 
 @dataclass(frozen=True)
 class ChatResponse:
+    """The result of a successful LLM chat request."""
+
     request_id: str
     model: str
     content: str
@@ -33,6 +37,8 @@ class ChatResponse:
 
 
 class LLMClientError(RuntimeError):
+    """Raised when an LLM request fails after all retries are exhausted."""
+
     def __init__(
         self,
         message: str,
@@ -54,12 +60,15 @@ class LLMClientError(RuntimeError):
 
 
 class AsyncRateLimiter:
+    """Token-bucket-like rate limiter that enforces requests-per-minute."""
+
     def __init__(self, requests_per_minute: int) -> None:
         self._requests_per_minute = requests_per_minute
         self._starts: deque[float] = deque()
         self._lock = asyncio.Lock()
 
     async def acquire(self) -> None:
+        """Wait until a request slot is available within the rate limit."""
         async with self._lock:
             now = time.monotonic()
             while self._starts and now - self._starts[0] >= 60:
@@ -80,6 +89,8 @@ class AsyncRateLimiter:
 
 
 class LLMClient:
+    """Async HTTP client for the LLM provider with concurrency control and retries."""
+
     def __init__(
         self,
         config: AppConfig,
@@ -105,9 +116,11 @@ class LLMClient:
         )
 
     async def close(self) -> None:
+        """Close the underlying httpx client."""
         await self._client.aclose()
 
     async def chat(self, model: str, messages: list[Message]) -> ChatResponse:
+        """Send a chat completion request, blocking on concurrency and rate limits."""
         self._config.validate_model(model)
         request_id = f"req_{uuid.uuid4().hex}"
         started = time.perf_counter()
@@ -129,6 +142,7 @@ class LLMClient:
     async def _chat_with_retries(
         self, request_id: str, model: str, messages: list[Message], started: float
     ) -> ChatResponse:
+        """Retry loop with exponential backoff for retryable failures."""
         retry_attempts = 0
         while True:
             try:
@@ -169,6 +183,7 @@ class LLMClient:
         started: float,
         retry_attempts: int,
     ) -> ChatResponse:
+        """Execute a single HTTP request and parse the response."""
         try:
             await self._failure_simulator.maybe_fail(request_id, model)
             response = await self._client.post(
@@ -393,6 +408,7 @@ class LLMClient:
 
 
 def extract_content(payload: dict[str, Any]) -> str:
+    """Extract the assistant message content from an OpenAI-compatible response."""
     try:
         content = payload["choices"][0]["message"]["content"]
     except (KeyError, IndexError, TypeError):
@@ -401,8 +417,10 @@ def extract_content(payload: dict[str, Any]) -> str:
 
 
 def as_optional_int(value: Any) -> int | None:
+    """Return the value if it's an int, otherwise None."""
     return value if isinstance(value, int) else None
 
 
 def is_retryable(status_code: int | None, error_type: str) -> bool:
+    """Return True if the failure is eligible for a retry."""
     return status_code in RETRYABLE_STATUS_CODES or error_type in {"timeout", "network"}

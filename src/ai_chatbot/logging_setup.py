@@ -1,3 +1,5 @@
+"""Structured JSON and plain-text log formatters with secret redaction."""
+
 from __future__ import annotations
 
 import json
@@ -35,6 +37,8 @@ SENSITIVE_KEY_FRAGMENTS = ("api_key", "authorization", "secret", "headers")
 
 
 class JsonFormatter(logging.Formatter):
+    """Emit log records as single-line JSON objects with keys sorted alphabetically."""
+
     def format(self, record: logging.LogRecord) -> str:
         payload: dict[str, Any] = {
             "timestamp": datetime.fromtimestamp(record.created, UTC).isoformat(),
@@ -50,6 +54,8 @@ class JsonFormatter(logging.Formatter):
 
 
 class PlainFormatter(logging.Formatter):
+    """Emit log records as a human-readable single line with key=value extras."""
+
     def format(self, record: logging.LogRecord) -> str:
         fields = []
         for key, value in record.__dict__.items():
@@ -61,6 +67,7 @@ class PlainFormatter(logging.Formatter):
 
 
 def setup_logging(log_level: str, json_logs: bool) -> None:
+    """Configure the root logger with a single stderr handler."""
     handler = logging.StreamHandler(sys.stderr)
     handler.setFormatter(JsonFormatter() if json_logs else PlainFormatter())
     root = logging.getLogger()
@@ -70,10 +77,12 @@ def setup_logging(log_level: str, json_logs: bool) -> None:
 
 
 def coerce_log_level(log_level: str) -> int:
+    """Convert a level name string to its logging module constant. Defaults to INFO."""
     return getattr(logging, log_level.upper(), logging.INFO)
 
 
 def sanitize_log_value(key: str, value: Any) -> Any:
+    """Redact sensitive values (API keys, tokens, secrets) from log output."""
     lowered = key.lower()
     if any(fragment in lowered for fragment in SENSITIVE_KEY_FRAGMENTS):
         return "[redacted]"
