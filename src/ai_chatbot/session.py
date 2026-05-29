@@ -20,9 +20,13 @@ class ChatSession:
     conversation_id: str
     active_model: str = field(init=False)
     history: list[Message] = field(default_factory=list)
+    thinking_enabled: bool = field(init=False)
+    thinking_budget_tokens: int = field(init=False)
 
     def __post_init__(self) -> None:
         self.active_model = self.config.default_model
+        self.thinking_enabled = self.config.thinking_enabled
+        self.thinking_budget_tokens = self.config.thinking_budget_tokens
 
     def set_model(self, model_id: str) -> None:
         """Switch the active model, validating it exists in config first."""
@@ -37,6 +41,41 @@ class ChatSession:
                 "to_model": model_id,
             },
         )
+
+    def set_thinking_enabled(self, enabled: bool) -> None:
+        """Toggle thinking on or off for this session."""
+        previous = self.thinking_enabled
+        self.thinking_enabled = enabled
+        logger.info(
+            "thinking_toggled",
+            extra={
+                "conversation_id": self.conversation_id,
+                "thinking_enabled": enabled,
+                "previous": previous,
+            },
+        )
+
+    def set_thinking_budget(self, budget: int) -> None:
+        """Set the session-level thinking token budget (minimum 1024)."""
+        if budget < 1024:
+            raise ValueError("Thinking budget must be at least 1024 tokens")
+        self.thinking_budget_tokens = budget
+        logger.info(
+            "thinking_budget_changed",
+            extra={
+                "conversation_id": self.conversation_id,
+                "thinking_budget_tokens": budget,
+            },
+        )
+
+    def effective_thinking_budget(self) -> int | None:
+        """Return the thinking budget if enabled and supported by the active model."""
+        if not self.thinking_enabled:
+            return None
+        model_config = self.config.models.get(self.active_model)
+        if model_config is None or model_config.thinking_budget_tokens <= 0:
+            return None
+        return min(self.thinking_budget_tokens, model_config.thinking_budget_tokens)
 
     def clear(self) -> None:
         """Drop all in-memory message history."""
@@ -57,7 +96,11 @@ class ChatSession:
 
         request_messages = list(self.history)
         try:
-            response = await client.chat(self.active_model, request_messages)
+            response = await client.chat(
+                self.active_model,
+                request_messages,
+                thinking_budget=self.effective_thinking_budget(),
+            )
         except LLMClientError as exc:
             await store.record_llm_request(
                 request_id=exc.request_id,

@@ -34,6 +34,7 @@ use_case = "Indian-language focused workflows"
 display_name = "Qwen3 32B"
 family = "qwen"
 use_case = "strong open model reasoning"
+thinking_budget_tokens = 16384
 
 [models."groq/compound-mini"]
 display_name = "Groq Compound Mini"

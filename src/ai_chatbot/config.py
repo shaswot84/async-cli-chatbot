@@ -30,6 +30,7 @@ class ModelConfig:
     display_name: str
     family: str
     use_case: str
+    thinking_budget_tokens: int = 0
 
 
 @dataclass(frozen=True)
@@ -48,6 +49,8 @@ class AppConfig:
     simulate_failures: bool
     simulate_failure_rate: float
     simulate_failure_kind: str
+    thinking_enabled: bool
+    thinking_budget_tokens: int
     models: dict[str, ModelConfig]
 
     def chat_url(self) -> str:
@@ -135,6 +138,7 @@ def load_config(models_path: Path = DEFAULT_MODELS_PATH) -> AppConfig:
             display_name=str(model_data.get("display_name", model_id)),
             family=str(model_data.get("family", "unknown")),
             use_case=str(model_data.get("use_case", "")),
+            thinking_budget_tokens=int(model_data.get("thinking_budget_tokens", 0)),
         )
         for model_id, model_data in models_data.items()
     }
@@ -156,6 +160,8 @@ def load_config(models_path: Path = DEFAULT_MODELS_PATH) -> AppConfig:
         simulate_failures=env_bool("SIMULATE_FAILURES", False),
         simulate_failure_rate=env_ratio("SIMULATE_FAILURE_RATE", 0.0),
         simulate_failure_kind=env_str("SIMULATE_FAILURE_KIND", "429"),
+        thinking_enabled=env_bool("THINKING_ENABLED", False),
+        thinking_budget_tokens=env_int("THINKING_BUDGET_TOKENS", 16000),
         models=models,
     )
 
@@ -173,6 +179,12 @@ def validate_config(config: AppConfig) -> None:
     if not config.models:
         raise ValueError("config/models.toml must define at least one model")
     config.validate_model(config.default_model)
+    for model_id, model_config in config.models.items():
+        tbt = model_config.thinking_budget_tokens
+        if tbt != 0 and tbt < 1024:
+            raise ValueError(
+                f"Model `{model_id}` thinking_budget_tokens must be 0 (disabled) or >= 1024, got {tbt}"
+            )
 
 
 def sanitized_config(config: AppConfig) -> dict[str, str | int | float | bool]:
@@ -194,6 +206,8 @@ def sanitized_config(config: AppConfig) -> dict[str, str | int | float | bool]:
         "simulate_failures": config.simulate_failures,
         "simulate_failure_rate": config.simulate_failure_rate,
         "simulate_failure_kind": config.simulate_failure_kind,
+        "thinking_enabled": config.thinking_enabled,
+        "thinking_budget_tokens": config.thinking_budget_tokens,
     }
 
 

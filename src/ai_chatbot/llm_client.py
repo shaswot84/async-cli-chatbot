@@ -119,7 +119,12 @@ class LLMClient:
         """Close the underlying httpx client."""
         await self._client.aclose()
 
-    async def chat(self, model: str, messages: list[Message]) -> ChatResponse:
+    async def chat(
+        self,
+        model: str,
+        messages: list[Message],
+        thinking_budget: int | None = None,
+    ) -> ChatResponse:
         """Send a chat completion request, blocking on concurrency and rate limits."""
         self._config.validate_model(model)
         request_id = f"req_{uuid.uuid4().hex}"
@@ -132,15 +137,23 @@ class LLMClient:
                 "request_id": request_id,
                 "model": model,
                 "prompt_chars": prompt_chars,
+                "thinking_budget": thinking_budget,
             },
         )
 
         async with self._semaphore:
             await self._rate_limiter.acquire()
-            return await self._chat_with_retries(request_id, model, messages, started)
+            return await self._chat_with_retries(
+                request_id, model, messages, started, thinking_budget=thinking_budget
+            )
 
     async def _chat_with_retries(
-        self, request_id: str, model: str, messages: list[Message], started: float
+        self,
+        request_id: str,
+        model: str,
+        messages: list[Message],
+        started: float,
+        thinking_budget: int | None = None,
     ) -> ChatResponse:
         """Retry loop with exponential backoff for retryable failures."""
         retry_attempts = 0
@@ -152,6 +165,7 @@ class LLMClient:
                     messages=messages,
                     started=started,
                     retry_attempts=retry_attempts,
+                    thinking_budget=thinking_budget,
                 )
             except LLMClientError as exc:
                 if (
@@ -182,22 +196,39 @@ class LLMClient:
         messages: list[Message],
         started: float,
         retry_attempts: int,
+        thinking_budget: int | None = None,
     ) -> ChatResponse:
         """Execute a single HTTP request and parse the response."""
         try:
             await self._failure_simulator.maybe_fail(request_id, model)
+
+            body: dict[str, object] = {
+                "model": model,
+                "messages": messages,
+                "max_tokens": self._config.max_output_tokens,
+                "temperature": 0,
+            }
+            if thinking_budget is not None:
+                body["thinking"] = {
+                    "type": "enabled",
+                    "budget_tokens": thinking_budget,
+                }
+                logger.info(
+                    "llm_request_thinking_active",
+                    extra={
+                        "request_id": request_id,
+                        "model": model,
+                        "thinking_budget_tokens": thinking_budget,
+                    },
+                )
+
             response = await self._client.post(
                 self._config.chat_url(),
                 headers={
                     "Authorization": f"Bearer {self._config.provider.api_key}",
                     "Content-Type": "application/json",
                 },
-                json={
-                    "model": model,
-                    "messages": messages,
-                    "max_tokens": self._config.max_output_tokens,
-                    "temperature": 0,
-                },
+                json=body,
             )
             latency_ms = round((time.perf_counter() - started) * 1000, 2)
             response.raise_for_status()
@@ -408,12 +439,22 @@ class LLMClient:
 
 
 def extract_content(payload: dict[str, Any]) -> str:
-    """Extract the assistant message content from an OpenAI-compatible response."""
+    """Extract the assistant message content from an OpenAI-compatible response.
+
+    Handles extended reasoning responses where content may be absent,
+    falling back to reasoning_content if available.
+    """
     try:
-        content = payload["choices"][0]["message"]["content"]
+        message = payload["choices"][0]["message"]
+        content = message.get("content")
+        if isinstance(content, str) and content:
+            return content
+        reasoning = message.get("reasoning_content")
+        if isinstance(reasoning, str) and reasoning:
+            return reasoning
     except (KeyError, IndexError, TypeError):
-        return ""
-    return content if isinstance(content, str) else ""
+        pass
+    return ""
 
 
 def as_optional_int(value: Any) -> int | None:

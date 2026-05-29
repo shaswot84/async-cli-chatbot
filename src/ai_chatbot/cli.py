@@ -122,6 +122,11 @@ async def run_repl(debug: bool = False) -> None:
                     f"{response.input_tokens}/{response.output_tokens}/{response.total_tokens}; "
                     f"retries: {response.retry_attempts}"
                 )
+                effective = session.effective_thinking_budget()
+                if effective is not None:
+                    token_text += f"; thinking: ON (budget: {effective})"
+                else:
+                    token_text += "; thinking: OFF"
                 console.print(f"[dim]{response.request_id} · {token_text}[/]")
     finally:
         await client.close()
@@ -141,6 +146,10 @@ def command_name(raw: str) -> str:
         return " ".join(parts[:2])
     if parts and parts[0] == "/fail":
         return "/fail"
+    if len(parts) >= 2 and parts[0] == "/think" and parts[1] in {"on", "off", "budget"}:
+        return " ".join(parts[:2])
+    if parts and parts[0] == "/think":
+        return "/think"
     return parts[0]
 
 
@@ -165,6 +174,10 @@ def command_handlers(
         "/fail kind": lambda raw: async_value(set_failure_kind(raw, failure_simulator)),
         "/clear": lambda _: async_value(clear_history(session)),
         "/config": lambda _: async_value(print_config(config)),
+        "/think": lambda _: async_value(show_thinking_status(session)),
+        "/think on": lambda _: async_value(enable_thinking(session)),
+        "/think off": lambda _: async_value(disable_thinking(session)),
+        "/think budget": lambda raw: async_value(set_thinking_budget(raw, session)),
     }
 
 
@@ -190,6 +203,10 @@ def print_help() -> bool:
         ("/fail off", "Disable simulated failures"),
         ("/fail rate <0.0-1.0>", "Set simulated failure probability"),
         ("/fail kind <kind>", "Set simulated failure kind"),
+        ("/think", "Show thinking status"),
+        ("/think on", "Enable extended reasoning"),
+        ("/think off", "Disable extended reasoning"),
+        ("/think budget <tokens>", "Set thinking token budget (min 1024)"),
         ("/clear", "Clear in-memory conversation"),
         ("/exit", "Quit"),
     ]
@@ -284,6 +301,69 @@ def set_failure_kind(raw: str, failure_simulator: FailureSimulator) -> bool:
         console.print(f"[red]{exc}[/]")
         return True
     console.print(f"Failure simulation kind: {failure_simulator.kind}")
+    return True
+
+
+def show_thinking_status(session: ChatSession) -> bool:
+    """Display current thinking status, budgets, and model support."""
+    model_config = session.config.models.get(session.active_model)
+    model_supports = model_config is not None and model_config.thinking_budget_tokens > 0
+
+    if session.thinking_enabled and model_supports:
+        model_budget = model_config.thinking_budget_tokens
+        effective = min(session.thinking_budget_tokens, model_budget)
+        console.print(
+            f"[green]Thinking: ON[/]\n"
+            f"  Session budget: {session.thinking_budget_tokens}\n"
+            f"  Model max budget ({session.active_model}): {model_budget}\n"
+            f"  Effective budget: {effective}"
+        )
+    elif session.thinking_enabled and not model_supports:
+        console.print(
+            f"[yellow]Thinking: ON (inactive)[/]\n"
+            f"  {session.active_model} does not configure a thinking budget.\n"
+            f"  Session budget: {session.thinking_budget_tokens} (not used)"
+        )
+    else:
+        console.print("[dim]Thinking: OFF[/]")
+    return True
+
+
+def enable_thinking(session: ChatSession) -> bool:
+    """Turn thinking on. Warns if the active model does not support it."""
+    session.set_thinking_enabled(True)
+    model_config = session.config.models.get(session.active_model)
+    model_supports = model_config is not None and model_config.thinking_budget_tokens > 0
+    if not model_supports:
+        console.print(
+            f"[yellow]Thinking enabled, but {session.active_model} does not configure a "
+            f"thinking budget. The thinking field will not be sent in requests.[/]"
+        )
+    else:
+        console.print("[green]Thinking enabled.[/]")
+    return True
+
+
+def disable_thinking(session: ChatSession) -> bool:
+    """Turn thinking off."""
+    session.set_thinking_enabled(False)
+    console.print("[dim]Thinking disabled.[/]")
+    return True
+
+
+def set_thinking_budget(raw: str, session: ChatSession) -> bool:
+    """Parse '/think budget <N>' and update the session thinking token budget."""
+    parts = raw.split(maxsplit=2)
+    if len(parts) < 3:
+        console.print("[yellow]Usage:[/] /think budget <tokens> (min 1024)")
+        return True
+    try:
+        budget = int(parts[2])
+        session.set_thinking_budget(budget)
+    except ValueError as exc:
+        console.print(f"[red]{exc}[/]")
+        return True
+    console.print(f"Thinking budget set to [cyan]{session.thinking_budget_tokens}[/]")
     return True
 
 
