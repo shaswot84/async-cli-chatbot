@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+from collections.abc import Callable
 from dataclasses import dataclass, field
 
 from ai_chatbot.config import AppConfig
@@ -22,11 +23,13 @@ class ChatSession:
     history: list[Message] = field(default_factory=list)
     thinking_enabled: bool = field(init=False)
     thinking_budget_tokens: int = field(init=False)
+    streaming_enabled: bool = field(init=False)
 
     def __post_init__(self) -> None:
         self.active_model = self.config.default_model
         self.thinking_enabled = self.config.thinking_enabled
         self.thinking_budget_tokens = self.config.thinking_budget_tokens
+        self.streaming_enabled = self.config.streaming_enabled
 
     def set_model(self, model_id: str) -> None:
         """Switch the active model, validating it exists in config first."""
@@ -77,11 +80,39 @@ class ChatSession:
             return None
         return min(self.thinking_budget_tokens, model_config.thinking_budget_tokens)
 
+    def set_streaming(self, enabled: bool) -> None:
+        """Toggle streaming on or off for this session."""
+        previous = self.streaming_enabled
+        self.streaming_enabled = enabled
+        logger.info(
+            "streaming_toggled",
+            extra={
+                "conversation_id": self.conversation_id,
+                "streaming_enabled": enabled,
+                "previous": previous,
+            },
+        )
+
+    def effective_streaming(self) -> bool:
+        """Return True if streaming should be used for the active model."""
+        if not self.streaming_enabled:
+            return False
+        model_config = self.config.models.get(self.active_model)
+        if model_config is None:
+            return False
+        return model_config.streaming_capable
+
     def clear(self) -> None:
         """Drop all in-memory message history."""
         self.history.clear()
 
-    async def send(self, client: LLMClient, store: ChatStore, content: str) -> ChatResponse:
+    async def send(
+        self,
+        client: LLMClient,
+        store: ChatStore,
+        content: str,
+        on_chunk: Callable[[str], None] | None = None,
+    ) -> ChatResponse:
         """Send a user message to the LLM, persist both sides, return the response."""
         logger.info(
             "chat_user_message_received",
@@ -95,44 +126,123 @@ class ChatSession:
         await store.add_message(self.conversation_id, "user", content, self.active_model)
 
         request_messages = list(self.history)
+        thinking_budget = self.effective_thinking_budget()
+        use_streaming = self.effective_streaming()
+
+        if use_streaming:
+            return await self._send_streaming(
+                client, store, request_messages, thinking_budget, on_chunk
+            )
+
         try:
             response = await client.chat(
                 self.active_model,
                 request_messages,
-                thinking_budget=self.effective_thinking_budget(),
+                thinking_budget=thinking_budget,
             )
         except LLMClientError as exc:
-            await store.record_llm_request(
-                request_id=exc.request_id,
-                conversation_id=self.conversation_id,
-                model=exc.model,
-                provider=self.config.provider.name,
-                messages=request_messages,
-                response_content=None,
-                status_code=exc.status_code,
-                success=False,
-                latency_ms=exc.latency_ms,
-                input_tokens=None,
-                output_tokens=None,
-                total_tokens=None,
-                error_type=exc.error_type,
-                error_message=str(exc),
-                retry_attempt=exc.retry_attempts,
-            )
-            logger.warning(
-                "llm_request_failed_persisted",
-                extra={
-                    "request_id": exc.request_id,
-                    "conversation_id": self.conversation_id,
-                    "model": exc.model,
-                    "latency_ms": exc.latency_ms,
-                    "status_code": exc.status_code,
-                    "error_type": exc.error_type,
-                    "retry_attempts": exc.retry_attempts,
-                },
-            )
+            await self._record_failure(store, exc, request_messages)
             raise
 
+        await self._record_success(store, response, request_messages)
+        self.history.append({"role": "assistant", "content": response.content})
+        await store.add_message(self.conversation_id, "assistant", response.content, response.model)
+        return response
+
+    async def _send_streaming(
+        self,
+        client: LLMClient,
+        store: ChatStore,
+        request_messages: list[Message],
+        thinking_budget: int | None,
+        on_chunk: Callable[[str], None] | None,
+    ) -> ChatResponse:
+        """Stream response chunks, accumulate content, and persist the result."""
+        content_parts: list[str] = []
+        final_usage: dict[str, int] = {}
+        request_id = ""
+        model = self.active_model
+
+        try:
+            async for chunk in client.chat_stream(
+                self.active_model,
+                request_messages,
+                thinking_budget=thinking_budget,
+            ):
+                if chunk.request_id:
+                    request_id = chunk.request_id
+                if chunk.delta:
+                    content_parts.append(chunk.delta)
+                    if on_chunk is not None:
+                        on_chunk(chunk.delta)
+                if chunk.usage is not None:
+                    final_usage = chunk.usage
+                    model = chunk.model or model
+        except LLMClientError as exc:
+            await self._record_failure(store, exc, request_messages)
+            raise
+
+        content = "".join(content_parts)
+        response = ChatResponse(
+            request_id=request_id,
+            model=model,
+            content=content,
+            latency_ms=0.0,  # streaming latency is wall-clock, set by caller if needed
+            status_code=200,
+            input_tokens=final_usage.get("prompt_tokens"),
+            output_tokens=final_usage.get("completion_tokens"),
+            total_tokens=final_usage.get("total_tokens"),
+            retry_attempts=0,
+        )
+        await self._record_success(store, response, request_messages)
+        self.history.append({"role": "assistant", "content": content})
+        await store.add_message(self.conversation_id, "assistant", content, response.model)
+        return response
+
+    async def _record_failure(
+        self,
+        store: ChatStore,
+        exc: LLMClientError,
+        request_messages: list[Message],
+    ) -> None:
+        """Persist a failed LLM request to the database."""
+        await store.record_llm_request(
+            request_id=exc.request_id,
+            conversation_id=self.conversation_id,
+            model=exc.model,
+            provider=self.config.provider.name,
+            messages=request_messages,
+            response_content=None,
+            status_code=exc.status_code,
+            success=False,
+            latency_ms=exc.latency_ms,
+            input_tokens=None,
+            output_tokens=None,
+            total_tokens=None,
+            error_type=exc.error_type,
+            error_message=str(exc),
+            retry_attempt=exc.retry_attempts,
+        )
+        logger.warning(
+            "llm_request_failed_persisted",
+            extra={
+                "request_id": exc.request_id,
+                "conversation_id": self.conversation_id,
+                "model": exc.model,
+                "latency_ms": exc.latency_ms,
+                "status_code": exc.status_code,
+                "error_type": exc.error_type,
+                "retry_attempts": exc.retry_attempts,
+            },
+        )
+
+    async def _record_success(
+        self,
+        store: ChatStore,
+        response: ChatResponse,
+        request_messages: list[Message],
+    ) -> None:
+        """Persist a successful LLM request to the database."""
         await store.record_llm_request(
             request_id=response.request_id,
             conversation_id=self.conversation_id,
@@ -158,6 +268,3 @@ class ChatSession:
                 "retry_attempts": response.retry_attempts,
             },
         )
-        self.history.append({"role": "assistant", "content": response.content})
-        await store.add_message(self.conversation_id, "assistant", response.content, response.model)
-        return response

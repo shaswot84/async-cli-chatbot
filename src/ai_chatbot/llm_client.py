@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import time
 import uuid
 from collections import deque
+from collections.abc import AsyncGenerator
 from dataclasses import dataclass
 from typing import Any
 
@@ -34,6 +36,16 @@ class ChatResponse:
     output_tokens: int | None
     total_tokens: int | None
     retry_attempts: int
+
+
+@dataclass(frozen=True)
+class StreamChunk:
+    """A single chunk from a streaming chat completion response."""
+
+    delta: str
+    request_id: str = ""
+    model: str | None = None
+    usage: dict[str, int] | None = None
 
 
 class LLMClientError(RuntimeError):
@@ -118,6 +130,203 @@ class LLMClient:
     async def close(self) -> None:
         """Close the underlying httpx client."""
         await self._client.aclose()
+
+    async def chat_stream(
+        self,
+        model: str,
+        messages: list[Message],
+        thinking_budget: int | None = None,
+    ) -> AsyncGenerator[StreamChunk, None]:
+        """Stream a chat completion, yielding content deltas as they arrive."""
+        self._config.validate_model(model)
+        request_id = f"req_{uuid.uuid4().hex}"
+        started = time.perf_counter()
+        prompt_chars = sum(len(message.get("content", "")) for message in messages)
+
+        logger.info(
+            "llm_request_started",
+            extra={
+                "request_id": request_id,
+                "model": model,
+                "prompt_chars": prompt_chars,
+                "thinking_budget": thinking_budget,
+                "streaming": True,
+            },
+        )
+
+        async with self._semaphore:
+            await self._rate_limiter.acquire()
+
+            body: dict[str, object] = {
+                "model": model,
+                "messages": messages,
+                "max_tokens": self._config.max_output_tokens,
+                "temperature": 0,
+                "stream": True,
+            }
+            if thinking_budget is not None:
+                body["thinking"] = {
+                    "type": "enabled",
+                    "budget_tokens": thinking_budget,
+                }
+
+            await self._failure_simulator.maybe_fail(request_id, model)
+
+            try:
+                async with self._client.stream(
+                    "POST",
+                    self._config.chat_url(),
+                    headers={
+                        "Authorization": f"Bearer {self._config.provider.api_key}",
+                        "Content-Type": "application/json",
+                    },
+                    json=body,
+                ) as response:
+                    response.raise_for_status()
+                    response_model: str | None = None
+                    usage: dict[str, int] | None = None
+
+                    async for line in response.aiter_lines():
+                        if not line.startswith("data: "):
+                            continue
+                        data = line[6:]
+                        if data == "[DONE]":
+                            break
+
+                        try:
+                            chunk = json.loads(data)
+                        except json.JSONDecodeError:
+                            continue
+
+                        if response_model is None:
+                            response_model = chunk.get("model")
+
+                        choices = chunk.get("choices", [])
+                        if choices:
+                            delta = choices[0].get("delta", {})
+                            delta_content = delta.get("content", "")
+                            if delta_content:
+                                yield StreamChunk(
+                                    delta=delta_content,
+                                    request_id=request_id,
+                                    model=response_model,
+                                )
+
+                        chunk_usage = chunk.get("usage")
+                        if chunk_usage is not None:
+                            usage = {
+                                "prompt_tokens": int(chunk_usage.get("prompt_tokens", 0)),
+                                "completion_tokens": int(chunk_usage.get("completion_tokens", 0)),
+                                "total_tokens": int(chunk_usage.get("total_tokens", 0)),
+                            }
+
+                    # Yield a final empty chunk carrying usage and model info.
+                    yield StreamChunk(
+                        delta="",
+                        request_id=request_id,
+                        model=response_model or model,
+                        usage=usage,
+                    )
+
+                    latency_ms = round((time.perf_counter() - started) * 1000, 2)
+                    logger.info(
+                        "llm_request_completed",
+                        extra={
+                            "request_id": request_id,
+                            "model": model,
+                            "latency_ms": latency_ms,
+                            "status_code": response.status_code,
+                            "input_tokens": usage.get("prompt_tokens") if usage else None,
+                            "output_tokens": usage.get("completion_tokens") if usage else None,
+                            "total_tokens": usage.get("total_tokens") if usage else None,
+                            "streaming": True,
+                        },
+                    )
+
+            except SimulatedProviderError as exc:
+                latency_ms = round((time.perf_counter() - started) * 1000, 2)
+                error_type = "schema" if exc.kind == "empty_response" else "http"
+                logger.warning(
+                    "llm_request_failed",
+                    extra={
+                        "request_id": request_id,
+                        "model": model,
+                        "latency_ms": latency_ms,
+                        "status_code": exc.status_code,
+                        "error_type": error_type,
+                        "streaming": True,
+                    },
+                )
+                raise LLMClientError(
+                    f"Request {request_id} simulated failure: {exc.kind}",
+                    request_id=request_id,
+                    model=model,
+                    latency_ms=latency_ms,
+                    status_code=exc.status_code,
+                    error_type=error_type,
+                ) from exc
+            except httpx.HTTPStatusError as exc:
+                latency_ms = round((time.perf_counter() - started) * 1000, 2)
+                logger.warning(
+                    "llm_request_failed",
+                    extra={
+                        "request_id": request_id,
+                        "model": model,
+                        "latency_ms": latency_ms,
+                        "status_code": exc.response.status_code,
+                        "error_type": "http",
+                        "streaming": True,
+                    },
+                )
+                raise LLMClientError(
+                    f"Provider returned HTTP {exc.response.status_code} for request {request_id}",
+                    request_id=request_id,
+                    model=model,
+                    latency_ms=latency_ms,
+                    status_code=exc.response.status_code,
+                    error_type="http",
+                ) from exc
+            except httpx.TimeoutException as exc:
+                latency_ms = round((time.perf_counter() - started) * 1000, 2)
+                logger.warning(
+                    "llm_request_failed",
+                    extra={
+                        "request_id": request_id,
+                        "model": model,
+                        "latency_ms": latency_ms,
+                        "status_code": None,
+                        "error_type": "timeout",
+                        "streaming": True,
+                    },
+                )
+                raise LLMClientError(
+                    f"Request {request_id} timed out",
+                    request_id=request_id,
+                    model=model,
+                    latency_ms=latency_ms,
+                    error_type="timeout",
+                ) from exc
+            except (httpx.HTTPError, json.JSONDecodeError) as exc:
+                latency_ms = round((time.perf_counter() - started) * 1000, 2)
+                error_type = "network" if isinstance(exc, httpx.HTTPError) else "schema"
+                logger.warning(
+                    "llm_request_failed",
+                    extra={
+                        "request_id": request_id,
+                        "model": model,
+                        "latency_ms": latency_ms,
+                        "status_code": None,
+                        "error_type": error_type,
+                        "streaming": True,
+                    },
+                )
+                raise LLMClientError(
+                    f"Request {request_id} failed: {exc.__class__.__name__}",
+                    request_id=request_id,
+                    model=model,
+                    latency_ms=latency_ms,
+                    error_type=error_type,
+                ) from exc
 
     async def chat(
         self,

@@ -8,6 +8,7 @@ from collections.abc import Awaitable, Callable
 
 import typer
 from rich.console import Console
+from rich.live import Live
 from rich.panel import Panel
 from rich.table import Table
 
@@ -95,9 +96,13 @@ async def run_repl(debug: bool = False) -> None:
                     break
                 continue
 
+            use_streaming = session.effective_streaming()
             try:
-                with console.status("Thinking...", spinner="dots"):
-                    response = await session.send(client, store, user_input)
+                if use_streaming:
+                    response = await _stream_chat_turn(session, client, store, user_input)
+                else:
+                    with console.status("Thinking...", spinner="dots"):
+                        response = await session.send(client, store, user_input)
             except LLMClientError as exc:
                 logger.warning(
                     "chat_turn_failed",
@@ -113,9 +118,10 @@ async def run_repl(debug: bool = False) -> None:
                 console.print(f"[red]Request failed:[/] {exc}")
                 continue
 
-            console.print(
-                Panel(response.content, title=f"{response.model} · {response.latency_ms} ms")
-            )
+            if not use_streaming:
+                console.print(
+                    Panel(response.content, title=f"{response.model} · {response.latency_ms} ms")
+                )
             if debug:
                 token_text = (
                     f"tokens in/out/total: "
@@ -127,6 +133,8 @@ async def run_repl(debug: bool = False) -> None:
                     token_text += f"; thinking: ON (budget: {effective})"
                 else:
                     token_text += "; thinking: OFF"
+                if use_streaming:
+                    token_text += "; streaming: ON"
                 console.print(f"[dim]{response.request_id} · {token_text}[/]")
     finally:
         await client.close()
@@ -135,6 +143,47 @@ async def run_repl(debug: bool = False) -> None:
             "chat_session_ended",
             extra={"conversation_id": conversation_id},
         )
+
+
+async def _stream_chat_turn(
+    session: ChatSession,
+    client: LLMClient,
+    store: ChatStore,
+    user_input: str,
+) -> ChatResponse:
+    """Run a chat turn with streaming, updating a Live panel in real-time."""
+    accumulated = ""
+
+    with Live(
+        Panel("...", title=f"{session.active_model} · streaming"),
+        refresh_per_second=15,
+        console=console,
+    ) as live:
+
+        def on_chunk(delta: str) -> None:
+            nonlocal accumulated
+            accumulated += delta
+            live.update(
+                Panel(accumulated, title=f"{session.active_model} · streaming")
+            )
+
+        try:
+            response = await session.send(
+                client, store, user_input, on_chunk=on_chunk
+            )
+        except LLMClientError as exc:
+            live.update(
+                Panel(f"[red]{exc}[/]", title=f"{session.active_model} · error")
+            )
+            raise
+
+        title = (
+            f"{response.model} · {response.latency_ms:.0f} ms"
+            if response.latency_ms
+            else f"{response.model} · streaming"
+        )
+        live.update(Panel(accumulated, title=title))
+        return response
 
 
 def command_name(raw: str) -> str:
@@ -150,6 +199,10 @@ def command_name(raw: str) -> str:
         return " ".join(parts[:2])
     if parts and parts[0] == "/think":
         return "/think"
+    if len(parts) >= 2 and parts[0] == "/stream" and parts[1] in {"on", "off"}:
+        return " ".join(parts[:2])
+    if parts and parts[0] == "/stream":
+        return "/stream"
     return parts[0]
 
 
@@ -178,6 +231,9 @@ def command_handlers(
         "/think on": lambda _: async_value(enable_thinking(session)),
         "/think off": lambda _: async_value(disable_thinking(session)),
         "/think budget": lambda raw: async_value(set_thinking_budget(raw, session)),
+        "/stream": lambda _: async_value(show_streaming_status(session)),
+        "/stream on": lambda _: async_value(enable_streaming(session)),
+        "/stream off": lambda _: async_value(disable_streaming(session)),
     }
 
 
@@ -207,6 +263,9 @@ def print_help() -> bool:
         ("/think on", "Enable extended reasoning"),
         ("/think off", "Disable extended reasoning"),
         ("/think budget <tokens>", "Set thinking token budget (min 1024)"),
+        ("/stream", "Show streaming status"),
+        ("/stream on", "Enable response streaming"),
+        ("/stream off", "Disable response streaming"),
         ("/clear", "Clear in-memory conversation"),
         ("/exit", "Quit"),
     ]
@@ -224,16 +283,19 @@ def print_models(config: AppConfig, session: ChatSession) -> bool:
     table.add_column("Family")
     table.add_column("Use case")
     table.add_column("Thinking", style="green")
+    table.add_column("Streaming", style="blue")
     for model in config.models.values():
         thinking = (
             f"{model.thinking_budget_tokens:,}" if model.thinking_budget_tokens > 0 else "-"
         )
+        streaming = "Yes" if model.streaming_capable else "No"
         table.add_row(
             "*" if model.model_id == session.active_model else "",
             model.model_id,
             model.family,
             model.use_case,
             thinking,
+            streaming,
         )
     console.print(table)
     return True
@@ -372,6 +434,43 @@ def set_thinking_budget(raw: str, session: ChatSession) -> bool:
         console.print(f"[red]{exc}[/]")
         return True
     console.print(f"Thinking budget set to [cyan]{session.thinking_budget_tokens}[/]")
+    return True
+
+
+def show_streaming_status(session: ChatSession) -> bool:
+    """Display current streaming status."""
+    model_config = session.config.models.get(session.active_model)
+    model_supports = model_config is not None and model_config.streaming_capable
+    if session.streaming_enabled and model_supports:
+        console.print("[green]Streaming: ON[/]")
+    elif session.streaming_enabled and not model_supports:
+        console.print(
+            f"[yellow]Streaming: ON (inactive)[/]\n"
+            f"  {session.active_model} does not support streaming."
+        )
+    else:
+        console.print("[dim]Streaming: OFF[/]")
+    return True
+
+
+def enable_streaming(session: ChatSession) -> bool:
+    """Turn streaming on. Warns if the active model does not support it."""
+    session.set_streaming(True)
+    model_config = session.config.models.get(session.active_model)
+    model_supports = model_config is not None and model_config.streaming_capable
+    if not model_supports:
+        console.print(
+            f"[yellow]Streaming enabled, but {session.active_model} does not support streaming.[/]"
+        )
+    else:
+        console.print("[green]Streaming enabled.[/]")
+    return True
+
+
+def disable_streaming(session: ChatSession) -> bool:
+    """Turn streaming off."""
+    session.set_streaming(False)
+    console.print("[dim]Streaming disabled.[/]")
     return True
 
 

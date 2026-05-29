@@ -31,6 +31,7 @@ class ModelConfig:
     family: str
     use_case: str
     thinking_budget_tokens: int = 0
+    streaming_capable: bool = True
 
 
 @dataclass(frozen=True)
@@ -51,6 +52,7 @@ class AppConfig:
     simulate_failure_kind: str
     thinking_enabled: bool
     thinking_budget_tokens: int
+    streaming_enabled: bool
     models: dict[str, ModelConfig]
 
     def chat_url(self) -> str:
@@ -161,6 +163,7 @@ def load_config(models_path: Path = DEFAULT_MODELS_PATH) -> AppConfig:
             family=str(model_data.get("family", "unknown")),
             use_case=str(model_data.get("use_case", "")),
             thinking_budget_tokens=int(model_data.get("thinking_budget_tokens", 0)),
+            streaming_capable=bool(model_data.get("streaming_capable", True)),
         )
         for model_id, model_data in models_data.items()
     }
@@ -184,6 +187,7 @@ def load_config(models_path: Path = DEFAULT_MODELS_PATH) -> AppConfig:
         simulate_failure_kind=env_str("SIMULATE_FAILURE_KIND", "429"),
         thinking_enabled=env_bool("THINKING_ENABLED", False),
         thinking_budget_tokens=env_int("THINKING_BUDGET_TOKENS", 16000),
+        streaming_enabled=env_bool("STREAMING_ENABLED", True),
         models=models,
     )
 
@@ -230,6 +234,7 @@ def sanitized_config(config: AppConfig) -> dict[str, str | int | float | bool]:
         "simulate_failure_kind": config.simulate_failure_kind,
         "thinking_enabled": config.thinking_enabled,
         "thinking_budget_tokens": config.thinking_budget_tokens,
+        "streaming_enabled": config.streaming_enabled,
     }
 
 
