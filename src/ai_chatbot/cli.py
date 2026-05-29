@@ -223,12 +223,17 @@ def print_models(config: AppConfig, session: ChatSession) -> bool:
     table.add_column("Model ID", style="cyan")
     table.add_column("Family")
     table.add_column("Use case")
+    table.add_column("Thinking", style="green")
     for model in config.models.values():
+        thinking = (
+            f"{model.thinking_budget_tokens:,}" if model.thinking_budget_tokens > 0 else "-"
+        )
         table.add_row(
             "*" if model.model_id == session.active_model else "",
             model.model_id,
             model.family,
             model.use_case,
+            thinking,
         )
     console.print(table)
     return True
@@ -241,13 +246,16 @@ def print_current_model(session: ChatSession) -> bool:
 
 
 def set_model(raw: str, session: ChatSession) -> bool:
-    """Parse '/model set <id>' and switch the active model."""
+    """Parse '/model set <id>' and switch the active model. Supports partial IDs."""
     parts = raw.split(maxsplit=2)
     if len(parts) < 3:
         console.print("[yellow]Usage:[/] /model set <model_id>")
         return True
     try:
-        session.set_model(parts[2])
+        resolved = session.config.resolve_model(parts[2])
+        if resolved != parts[2]:
+            console.print(f"[dim]Resolved `{parts[2]}` → `{resolved}`[/]")
+        session.set_model(resolved)
     except ValueError as exc:
         console.print(f"[red]{exc}[/]")
         return True

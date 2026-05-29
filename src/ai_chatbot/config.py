@@ -65,6 +65,28 @@ class AppConfig:
             available = ", ".join(self.models)
             raise ValueError(f"Unknown model `{model_id}`. Available models: {available}")
 
+    def resolve_model(self, partial: str) -> str:
+        """Resolve a partial model ID to its canonical form.
+
+        Exact matches are returned immediately. Otherwise, models whose ID
+        contains the input as a substring are collected. If exactly one
+        candidate is found it is returned. Zero or multiple candidates raise
+        ValueError with an appropriate message.
+        """
+        if partial in self.models:
+            return partial
+
+        candidates = [mid for mid in self.models if partial in mid]
+        if len(candidates) == 1:
+            return candidates[0]
+        if len(candidates) > 1:
+            raise ValueError(
+                f"`{partial}` matches multiple models: {', '.join(candidates)}. "
+                f"Please be more specific."
+            )
+        available = ", ".join(self.models)
+        raise ValueError(f"Unknown model `{partial}`. Available models: {available}")
+
 
 def load_dotenv(path: Path = PROJECT_ROOT / ".env") -> None:
     """Load key=value pairs from a .env file, skipping already-set variables."""
