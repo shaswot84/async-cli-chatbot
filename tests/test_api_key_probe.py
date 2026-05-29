@@ -61,7 +61,7 @@ def test_validate_config_rejects_unknown_default_model() -> None:
         models=config.models,
     )
 
-    assert "DEFAULT_MODEL must exist in config/models.toml" in api_key_probe.validate_config(
+    assert "DEFAULT_MODEL must exist in models.toml" in api_key_probe.validate_config(
         bad_config
     )
 

@@ -20,7 +20,7 @@ from urllib.parse import urljoin, urlparse
 import httpx
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
-DEFAULT_CONFIG_PATH = PROJECT_ROOT / "config" / "models.toml"
+DEFAULT_CONFIG_PATH = PROJECT_ROOT / "src" / "ai_chatbot" / "models.toml"
 DEFAULT_RAW_REPORT_PATH = PROJECT_ROOT / "reports" / "api_key_preflight_raw.json"
 
 RETRYABLE_STATUS_CODES = {429, 500, 502, 503, 504}
@@ -187,9 +187,9 @@ def validate_config(config: RuntimeConfig) -> list[str]:
     if not config.provider.chat_completions_path.startswith("/"):
         errors.append("LLM_CHAT_COMPLETIONS_PATH must start with /")
     if config.settings.default_model not in config.models:
-        errors.append("DEFAULT_MODEL must exist in config/models.toml")
+        errors.append("DEFAULT_MODEL must exist in models.toml")
     if not config.models:
-        errors.append("config/models.toml must define at least one model")
+        errors.append("models.toml must define at least one model")
 
     return errors
 
@@ -772,7 +772,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--config",
         default=str(DEFAULT_CONFIG_PATH),
-        help="Path to config/models.toml",
+        help="Path to models.toml",
     )
     return parser.parse_args()
 

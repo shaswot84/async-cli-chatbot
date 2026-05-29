@@ -32,6 +32,30 @@ def apply_theme(name: str) -> None:
     console = Console(theme=get_theme(resolved))
 
 
+import base64
+import os
+from pathlib import Path
+
+
+def _save_images(images: tuple[dict[str, str], ...]) -> list[str]:
+    """Save base64-encoded images to disk. Returns list of clickable file:// links or URLs."""
+    saved: list[str] = []
+    output_dir = Path("data/images")
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    for i, img in enumerate(images):
+        b64 = img.get("b64_json")
+        if b64:
+            path = output_dir / f"generated_{i + 1}.png"
+            path.write_bytes(base64.b64decode(b64))
+            saved.append(path.resolve().as_uri())  # file:///... link
+            continue
+        url = img.get("url")
+        if url and not url.startswith("data:"):
+            saved.append(url)  # remote URL, already clickable
+    return saved
+
+
 def _prompt_markup(session: ChatSession) -> str:
     """Build a theme-coloured prompt string for the current model."""
     styles: dict[str, str] = {
@@ -43,6 +67,9 @@ def _prompt_markup(session: ChatSession) -> str:
         "gruvbox": "bold #b8bb26",
     }
     color = styles.get(session.theme_name, "bold cyan")
+    mc = session.config.models.get(session.active_model)
+    if mc is not None and mc.image_capable:
+        return f"[{color}]🎨 {session.active_model}>[/] "
     return f"[{color}]{session.active_model}>[/] "
 
 
@@ -78,7 +105,7 @@ async def run_repl(debug: bool = False) -> None:
         kind=config.simulate_failure_kind,
     )
     client = LLMClient(config, failure_simulator)
-    commands = command_handlers(config, session, store, failure_simulator)
+    commands = command_handlers(config, session, store, failure_simulator, client)
     logger.info(
         "chat_session_started",
         extra={
@@ -145,12 +172,16 @@ async def run_repl(debug: bool = False) -> None:
             if not use_streaming:
                 console.print(
                     Panel(
-                        response.content,
+                        response.content or "(generated image)",
                         title=f"{response.model} · {response.latency_ms} ms",
                         style="response",
                         title_align="left",
                     )
                 )
+            if response.images:
+                saved = _save_images(response.images)
+                for path in saved:
+                    console.print(f"[success]Image:[/] [link={path}]{path}[/link]")
             if debug:
                 token_text = (
                     f"tokens in/out/total: "
@@ -211,7 +242,11 @@ async def _stream_chat_turn(
             if response.latency_ms
             else f"{response.model} · streaming"
         )
-        live.update(Panel(accumulated, title=title, style="response"))
+        live.update(Panel(accumulated or "(generated image)", title=title, style="response"))
+        if response.images:
+            saved = _save_images(response.images)
+            for path in saved:
+                console.print(f"[success]Image:[/] [link={path}]{path}[/link]")
         return response
 
 
@@ -244,6 +279,7 @@ def command_handlers(
     session: ChatSession,
     store: ChatStore,
     failure_simulator: FailureSimulator,
+    client: LLMClient,
 ) -> dict[str, Callable[[str], Awaitable[bool]]]:
     """Build a dispatch table mapping command strings to async handlers."""
     return {
@@ -270,6 +306,7 @@ def command_handlers(
         "/theme": lambda _: async_value(show_theme_status(session)),
         "/theme list": lambda _: async_value(list_themes()),
         "/theme set": lambda raw: async_value(set_theme_cmd(raw, session)),
+        "/image": lambda raw: generate_image(raw, session, client, store),
     }
 
 
@@ -305,6 +342,7 @@ def print_help() -> bool:
         ("/theme", "Show current theme"),
         ("/theme list", "List available themes"),
         ("/theme set <name>", "Switch to a different theme"),
+        ("/image <prompt>", "Generate an image using the image model"),
         ("/clear", "Clear in-memory conversation"),
         ("/exit", "Quit"),
     ]
@@ -323,11 +361,13 @@ def print_models(config: AppConfig, session: ChatSession) -> bool:
     table.add_column("Use case")
     table.add_column("Thinking", style="success")
     table.add_column("Streaming", style="info")
+    table.add_column("Image", style="warning")
     for model in config.models.values():
         thinking = (
             f"{model.thinking_budget_tokens:,}" if model.thinking_budget_tokens > 0 else "-"
         )
         streaming = "Yes" if model.streaming_capable else "No"
+        image = "Yes" if model.image_capable else "-"
         table.add_row(
             "*" if model.model_id == session.active_model else "",
             model.model_id,
@@ -335,15 +375,27 @@ def print_models(config: AppConfig, session: ChatSession) -> bool:
             model.use_case,
             thinking,
             streaming,
+            image,
         )
     console.print(table)
     return True
 
 
 def print_current_model(session: ChatSession) -> bool:
-    """Print the currently active model ID."""
+    """Print the currently active model ID and its capabilities."""
+    mc = session.config.models.get(session.active_model)
     console.print("Current model: ", end="")
     console.print(session.active_model, style="highlight")
+    if mc is not None:
+        tags = []
+        if mc.thinking_budget_tokens > 0:
+            tags.append(f"thinking ({mc.thinking_budget_tokens:,})")
+        if mc.image_capable:
+            tags.append("image generation")
+        if not mc.streaming_capable:
+            tags.append("no streaming")
+        if tags:
+            console.print(f"  Capabilities: {', '.join(tags)}", style="dim")
     return True
 
 
@@ -361,7 +413,12 @@ def set_model(raw: str, session: ChatSession) -> bool:
     except ValueError as exc:
         console.print(f"[red]{exc}[/]")
         return True
-    console.print(f"Switched to [cyan]{session.active_model}[/]")
+    console.print(f"Switched to [highlight]{session.active_model}[/]")
+    mc = session.config.models.get(session.active_model)
+    if mc is not None and mc.image_capable:
+        console.print(
+            "  [dim]This is an image-generation model. Type a prompt to generate images.[/]"
+        )
     return True
 
 
@@ -553,6 +610,55 @@ def set_theme_cmd(raw: str, session: ChatSession) -> bool:
         f"Theme switched to [highlight]{session.theme_name}[/]. "
         f"Available: {available}"
     )
+    return True
+
+
+async def generate_image(
+    raw: str, session: ChatSession, client: LLMClient, store: ChatStore
+) -> bool:
+    """Parse '/image <prompt>' and generate an image using the configured image model."""
+    parts = raw.split(maxsplit=1)
+    if len(parts) < 2 or not parts[1].strip():
+        console.print("[yellow]Usage:[/] /image <prompt>")
+        return True
+
+    image_models = [
+        mid for mid, mc in session.config.models.items() if mc.image_capable
+    ]
+    if not image_models:
+        console.print("[red]No image-capable model configured.[/]")
+        return True
+
+    image_model = image_models[0]
+    prompt = parts[1].strip()
+
+    with console.status(f"Generating with {image_model}...", spinner="dots"):
+        try:
+            result = await client.generate_image(
+                image_model, prompt, n=session.config.image_n
+            )
+        except LLMClientError as exc:
+            console.print(f"[red]Image generation failed:[/] {exc}")
+            return True
+
+    if result.images:
+        saved = _save_images(result.images)
+        links = "\n".join(f"[link={p}]{p}[/link]" for p in saved)
+        console.print(
+            Panel(
+                links,
+                title=f"{result.model} · {result.latency_ms:.0f} ms",
+                style="response",
+            )
+        )
+    else:
+        console.print(
+            Panel(
+                "[yellow]No image data returned.[/]",
+                title=f"{result.model} · {result.latency_ms:.0f} ms",
+                style="error",
+            )
+        )
     return True
 
 

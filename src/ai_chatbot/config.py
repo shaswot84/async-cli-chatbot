@@ -9,7 +9,7 @@ from pathlib import Path
 from urllib.parse import urljoin, urlparse
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
-DEFAULT_MODELS_PATH = PROJECT_ROOT / "config" / "models.toml"
+DEFAULT_MODELS_PATH = Path(__file__).resolve().parent / "models.toml"
 
 
 @dataclass(frozen=True)
@@ -20,6 +20,7 @@ class ProviderConfig:
     base_url: str
     api_key: str
     chat_completions_path: str
+    image_generations_path: str = "/images/generations"
 
 
 @dataclass(frozen=True)
@@ -32,6 +33,7 @@ class ModelConfig:
     use_case: str
     thinking_budget_tokens: int = 0
     streaming_capable: bool = True
+    image_capable: bool = False
 
 
 @dataclass(frozen=True)
@@ -54,12 +56,19 @@ class AppConfig:
     thinking_budget_tokens: int
     streaming_enabled: bool
     theme: str
+    image_n: int
     models: dict[str, ModelConfig]
 
     def chat_url(self) -> str:
         """Build the full chat completions endpoint URL from base URL and path."""
         base = self.provider.base_url.rstrip("/") + "/"
         path = self.provider.chat_completions_path.lstrip("/")
+        return urljoin(base, path)
+
+    def image_url(self) -> str:
+        """Build the full image generations endpoint URL."""
+        base = self.provider.base_url.rstrip("/") + "/"
+        path = self.provider.image_generations_path.lstrip("/")
         return urljoin(base, path)
 
     def validate_model(self, model_id: str) -> None:
@@ -155,6 +164,9 @@ def load_config(models_path: Path = DEFAULT_MODELS_PATH) -> AppConfig:
             "LLM_CHAT_COMPLETIONS_PATH",
             str(provider_data.get("chat_completions_path", "/chat/completions")),
         ),
+        image_generations_path=str(
+            provider_data.get("image_generations_path", "/images/generations")
+        ),
     )
 
     models = {
@@ -165,6 +177,7 @@ def load_config(models_path: Path = DEFAULT_MODELS_PATH) -> AppConfig:
             use_case=str(model_data.get("use_case", "")),
             thinking_budget_tokens=int(model_data.get("thinking_budget_tokens", 0)),
             streaming_capable=bool(model_data.get("streaming_capable", True)),
+            image_capable=bool(model_data.get("image_capable", False)),
         )
         for model_id, model_data in models_data.items()
     }
@@ -190,6 +203,7 @@ def load_config(models_path: Path = DEFAULT_MODELS_PATH) -> AppConfig:
         thinking_budget_tokens=env_int("THINKING_BUDGET_TOKENS", 16000),
         streaming_enabled=env_bool("STREAMING_ENABLED", True),
         theme=env_str("THEME", "dark"),
+        image_n=env_int("IMAGE_N", 1),
         models=models,
     )
 
@@ -205,7 +219,7 @@ def validate_config(config: AppConfig) -> None:
     if not config.provider.chat_completions_path.startswith("/"):
         raise ValueError("LLM_CHAT_COMPLETIONS_PATH must start with /")
     if not config.models:
-        raise ValueError("config/models.toml must define at least one model")
+        raise ValueError("models.toml must define at least one model")
     config.validate_model(config.default_model)
     for model_id, model_config in config.models.items():
         tbt = model_config.thinking_budget_tokens
@@ -238,6 +252,7 @@ def sanitized_config(config: AppConfig) -> dict[str, str | int | float | bool]:
         "thinking_budget_tokens": config.thinking_budget_tokens,
         "streaming_enabled": config.streaming_enabled,
         "theme": config.theme,
+        "image_n": config.image_n,
     }
 
 

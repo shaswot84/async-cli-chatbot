@@ -3,6 +3,7 @@ name = "multi-llm-router"
 base_url_env = "LLM_BASE_URL"
 api_key_env = "LLM_API_KEY"
 chat_completions_path = "/chat/completions"
+image_generations_path = "/images/generations"
 
 [defaults]
 model = "llama-3.1-8b-instant"
@@ -40,3 +41,9 @@ thinking_budget_tokens = 16384
 display_name = "Groq Compound Mini"
 family = "compound"
 use_case = "fast agentic/tool-style responses"
+
+[models."gemini-3-pro-image-preview"]
+display_name = "Gemini 3 Pro Image Preview"
+family = "gemini"
+use_case = "image generation"
+image_capable = true

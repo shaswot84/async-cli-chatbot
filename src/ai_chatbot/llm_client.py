@@ -36,6 +36,7 @@ class ChatResponse:
     output_tokens: int | None
     total_tokens: int | None
     retry_attempts: int
+    images: tuple[dict[str, str], ...] = ()
 
 
 @dataclass(frozen=True)
@@ -46,6 +47,16 @@ class StreamChunk:
     request_id: str = ""
     model: str | None = None
     usage: dict[str, int] | None = None
+
+
+@dataclass(frozen=True)
+class ImageResult:
+    """The result of an image generation request."""
+
+    request_id: str
+    model: str
+    images: tuple[dict[str, str], ...]  # {'b64_json': ...} or {'url': ...}
+    latency_ms: float
 
 
 class LLMClientError(RuntimeError):
@@ -130,6 +141,105 @@ class LLMClient:
     async def close(self) -> None:
         """Close the underlying httpx client."""
         await self._client.aclose()
+
+    async def generate_image(
+        self,
+        model: str,
+        prompt: str,
+        n: int = 1,
+    ) -> ImageResult:
+        """Generate one or more images via the provider's image generations endpoint."""
+        self._config.validate_model(model)
+        request_id = f"img_{uuid.uuid4().hex}"
+        started = time.perf_counter()
+
+        logger.info(
+            "image_generation_started",
+            extra={"request_id": request_id, "model": model, "prompt_chars": len(prompt)},
+        )
+
+        body: dict[str, object] = {
+            "model": model,
+            "prompt": prompt,
+            "n": n,
+        }
+
+        try:
+            response = await self._client.post(
+                self._config.image_url(),
+                headers={
+                    "Authorization": f"Bearer {self._config.provider.api_key}",
+                    "Content-Type": "application/json",
+                },
+                json=body,
+            )
+            latency_ms = round((time.perf_counter() - started) * 1000, 2)
+            response.raise_for_status()
+            payload = response.json()
+        except httpx.HTTPStatusError as exc:
+            latency_ms = round((time.perf_counter() - started) * 1000, 2)
+            logger.warning(
+                "image_generation_failed",
+                extra={
+                    "request_id": request_id,
+                    "model": model,
+                    "latency_ms": latency_ms,
+                    "status_code": exc.response.status_code,
+                },
+            )
+            raise LLMClientError(
+                f"Image generation returned HTTP {exc.response.status_code}",
+                request_id=request_id,
+                model=model,
+                latency_ms=latency_ms,
+                status_code=exc.response.status_code,
+                error_type="http",
+            ) from exc
+        except httpx.TimeoutException as exc:
+            latency_ms = round((time.perf_counter() - started) * 1000, 2)
+            raise LLMClientError(
+                f"Image generation timed out",
+                request_id=request_id,
+                model=model,
+                latency_ms=latency_ms,
+                error_type="timeout",
+            ) from exc
+        except (httpx.HTTPError, ValueError) as exc:
+            latency_ms = round((time.perf_counter() - started) * 1000, 2)
+            raise LLMClientError(
+                f"Image generation failed: {exc.__class__.__name__}",
+                request_id=request_id,
+                model=model,
+                latency_ms=latency_ms,
+                error_type="network",
+            ) from exc
+
+        images: list[dict[str, str]] = []
+        data = payload.get("data", [])
+        if isinstance(data, list):
+            for item in data:
+                if isinstance(item, dict):
+                    if "b64_json" in item:
+                        images.append({"b64_json": str(item["b64_json"])})
+                    elif "url" in item:
+                        images.append({"url": str(item["url"])})
+
+        logger.info(
+            "image_generation_completed",
+            extra={
+                "request_id": request_id,
+                "model": model,
+                "latency_ms": latency_ms,
+                "images_count": len(images),
+            },
+        )
+
+        return ImageResult(
+            request_id=request_id,
+            model=model,
+            images=tuple(images),
+            latency_ms=latency_ms,
+        )
 
     async def chat_stream(
         self,
@@ -597,7 +707,8 @@ class LLMClient:
                 retry_attempts=retry_attempts,
             ) from exc
         content = extract_content(payload)
-        if not content:
+        images = extract_images(payload)
+        if not content and not images:
             logger.warning(
                 "llm_request_failed",
                 extra={
@@ -644,6 +755,7 @@ class LLMClient:
             output_tokens=as_optional_int(usage.get("completion_tokens")),
             total_tokens=as_optional_int(usage.get("total_tokens")),
             retry_attempts=retry_attempts,
+            images=tuple(images),
         )
 
 
@@ -651,19 +763,80 @@ def extract_content(payload: dict[str, Any]) -> str:
     """Extract the assistant message content from an OpenAI-compatible response.
 
     Handles extended reasoning responses where content may be absent,
-    falling back to reasoning_content if available.
+    falling back to reasoning_content if available. For image-generation
+    models, the content may describe the generated image.
     """
     try:
         message = payload["choices"][0]["message"]
         content = message.get("content")
         if isinstance(content, str) and content:
             return content
+        # Some multimodal responses use a list of content parts
+        if isinstance(content, list):
+            text_parts = [p.get("text", "") for p in content if isinstance(p, dict) and p.get("type") in (None, "text")]
+            joined = "".join(text_parts)
+            if joined:
+                return joined
         reasoning = message.get("reasoning_content")
         if isinstance(reasoning, str) and reasoning:
             return reasoning
     except (KeyError, IndexError, TypeError):
         pass
     return ""
+
+
+def extract_images(payload: dict[str, Any]) -> list[dict[str, str]]:
+    """Extract generated images from an OpenAI-compatible chat response.
+
+    Supports two formats:
+    - message.images: list of dicts with 'b64_json' or 'url' keys
+    - message.content: list of multimodal parts with 'image_url' or 'image' type
+    """
+    images: list[dict[str, str]] = []
+    try:
+        message = payload["choices"][0]["message"]
+
+        # Format 1: dedicated images array
+        raw_images = message.get("images")
+        if isinstance(raw_images, list):
+            for img in raw_images:
+                if isinstance(img, dict):
+                    if "b64_json" in img:
+                        images.append({"b64_json": str(img["b64_json"])})
+                    elif "url" in img:
+                        images.append({"url": str(img["url"])})
+
+        # Format 2: multimodal content parts
+        content = message.get("content")
+        if isinstance(content, list):
+            for part in content:
+                if not isinstance(part, dict):
+                    continue
+                if part.get("type") == "image_url" and "image_url" in part:
+                    img_obj = part["image_url"]
+                    if isinstance(img_obj, dict) and "url" in img_obj:
+                        images.append({"url": str(img_obj["url"])})
+                elif part.get("type") == "image" and "image" in part:
+                    img_obj = part["image"]
+                    if isinstance(img_obj, dict):
+                        if "b64_json" in img_obj:
+                            images.append({"b64_json": str(img_obj["b64_json"])})
+                        elif "url" in img_obj:
+                            images.append({"url": str(img_obj["url"])})
+
+        # Format 3: top-level data (some image-only endpoints)
+        raw_data = payload.get("data")
+        if isinstance(raw_data, list):
+            for item in raw_data:
+                if isinstance(item, dict):
+                    if "b64_json" in item:
+                        images.append({"b64_json": str(item["b64_json"])})
+                    elif "url" in item:
+                        images.append({"url": str(item["url"])})
+
+    except (KeyError, IndexError, TypeError):
+        pass
+    return images
 
 
 def as_optional_int(value: Any) -> int | None:
