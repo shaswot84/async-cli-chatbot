@@ -53,6 +53,7 @@ class AppConfig:
     thinking_enabled: bool
     thinking_budget_tokens: int
     streaming_enabled: bool
+    theme: str
     models: dict[str, ModelConfig]
 
     def chat_url(self) -> str:
@@ -188,6 +189,7 @@ def load_config(models_path: Path = DEFAULT_MODELS_PATH) -> AppConfig:
         thinking_enabled=env_bool("THINKING_ENABLED", False),
         thinking_budget_tokens=env_int("THINKING_BUDGET_TOKENS", 16000),
         streaming_enabled=env_bool("STREAMING_ENABLED", True),
+        theme=env_str("THEME", "dark"),
         models=models,
     )
 
@@ -235,6 +237,7 @@ def sanitized_config(config: AppConfig) -> dict[str, str | int | float | bool]:
         "thinking_enabled": config.thinking_enabled,
         "thinking_budget_tokens": config.thinking_budget_tokens,
         "streaming_enabled": config.streaming_enabled,
+        "theme": config.theme,
     }
 
 

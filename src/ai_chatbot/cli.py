@@ -18,10 +18,32 @@ from ai_chatbot.failure_simulator import FailureSimulator, supported_failure_kin
 from ai_chatbot.llm_client import LLMClient, LLMClientError
 from ai_chatbot.logging_setup import setup_logging
 from ai_chatbot.session import ChatSession
+from ai_chatbot.themes import available_themes, get_theme, resolve_theme_name
 
 app = typer.Typer(add_completion=False, help="Asynchronous command-line AI chatbot.")
-console = Console()
+console: Console = Console()
 logger = logging.getLogger(__name__)
+
+
+def apply_theme(name: str) -> None:
+    """Swap the global console for one using the named theme."""
+    global console
+    resolved = resolve_theme_name(name)
+    console = Console(theme=get_theme(resolved))
+
+
+def _prompt_markup(session: ChatSession) -> str:
+    """Build a theme-coloured prompt string for the current model."""
+    styles: dict[str, str] = {
+        "dark": "bold cyan",
+        "light": "bold blue",
+        "monokai": "bold #a6e22e",
+        "dracula": "bold #bd93f9",
+        "nord": "bold #88c0d0",
+        "gruvbox": "bold #b8bb26",
+    }
+    color = styles.get(session.theme_name, "bold cyan")
+    return f"[{color}]{session.active_model}>[/] "
 
 
 @app.callback(invoke_without_command=True)
@@ -44,6 +66,8 @@ async def run_repl(debug: bool = False) -> None:
         raise typer.Exit(2) from exc
 
     setup_logging(config.log_level, config.log_json)
+    apply_theme(config.theme)
+
     store = ChatStore(config.sqlite_path)
     await store.initialize()
     conversation_id = await store.start_conversation(config.default_model)
@@ -77,7 +101,7 @@ async def run_repl(debug: bool = False) -> None:
     try:
         while True:
             try:
-                user_input = console.input(f"[bold cyan]{session.active_model}>[/] ").strip()
+                user_input = console.input(_prompt_markup(session)).strip()
             except (EOFError, KeyboardInterrupt):
                 console.print("\n[dim]Bye.[/]")
                 logger.info(
@@ -120,7 +144,12 @@ async def run_repl(debug: bool = False) -> None:
 
             if not use_streaming:
                 console.print(
-                    Panel(response.content, title=f"{response.model} · {response.latency_ms} ms")
+                    Panel(
+                        response.content,
+                        title=f"{response.model} · {response.latency_ms} ms",
+                        style="response",
+                        title_align="left",
+                    )
                 )
             if debug:
                 token_text = (
@@ -155,7 +184,7 @@ async def _stream_chat_turn(
     accumulated = ""
 
     with Live(
-        Panel("...", title=f"{session.active_model} · streaming"),
+        Panel("...", title=f"{session.active_model} · streaming", style="response"),
         refresh_per_second=15,
         console=console,
     ) as live:
@@ -164,7 +193,7 @@ async def _stream_chat_turn(
             nonlocal accumulated
             accumulated += delta
             live.update(
-                Panel(accumulated, title=f"{session.active_model} · streaming")
+                Panel(accumulated, title=f"{session.active_model} · streaming", style="response")
             )
 
         try:
@@ -173,7 +202,7 @@ async def _stream_chat_turn(
             )
         except LLMClientError as exc:
             live.update(
-                Panel(f"[red]{exc}[/]", title=f"{session.active_model} · error")
+                Panel(str(exc), title=f"{session.active_model} · error", style="error")
             )
             raise
 
@@ -182,7 +211,7 @@ async def _stream_chat_turn(
             if response.latency_ms
             else f"{response.model} · streaming"
         )
-        live.update(Panel(accumulated, title=title))
+        live.update(Panel(accumulated, title=title, style="response"))
         return response
 
 
@@ -203,6 +232,10 @@ def command_name(raw: str) -> str:
         return " ".join(parts[:2])
     if parts and parts[0] == "/stream":
         return "/stream"
+    if len(parts) >= 2 and parts[0] == "/theme" and parts[1] in {"list", "set"}:
+        return " ".join(parts[:2])
+    if parts and parts[0] == "/theme":
+        return "/theme"
     return parts[0]
 
 
@@ -234,6 +267,9 @@ def command_handlers(
         "/stream": lambda _: async_value(show_streaming_status(session)),
         "/stream on": lambda _: async_value(enable_streaming(session)),
         "/stream off": lambda _: async_value(disable_streaming(session)),
+        "/theme": lambda _: async_value(show_theme_status(session)),
+        "/theme list": lambda _: async_value(list_themes()),
+        "/theme set": lambda raw: async_value(set_theme_cmd(raw, session)),
     }
 
 
@@ -244,8 +280,8 @@ async def async_value(value: bool) -> bool:
 
 def print_help() -> bool:
     """Render the help table of available slash commands."""
-    table = Table(title="Commands")
-    table.add_column("Command", style="cyan")
+    table = Table(title="Commands", style="help.border", header_style="table.header")
+    table.add_column("Command", style="highlight")
     table.add_column("Action")
     rows = [
         ("/help", "Show commands"),
@@ -266,6 +302,9 @@ def print_help() -> bool:
         ("/stream", "Show streaming status"),
         ("/stream on", "Enable response streaming"),
         ("/stream off", "Disable response streaming"),
+        ("/theme", "Show current theme"),
+        ("/theme list", "List available themes"),
+        ("/theme set <name>", "Switch to a different theme"),
         ("/clear", "Clear in-memory conversation"),
         ("/exit", "Quit"),
     ]
@@ -277,13 +316,13 @@ def print_help() -> bool:
 
 def print_models(config: AppConfig, session: ChatSession) -> bool:
     """Render a table of configured models with the active one marked."""
-    table = Table(title="Configured Models")
+    table = Table(title="Configured Models", style="table.border", header_style="table.header")
     table.add_column("Active")
-    table.add_column("Model ID", style="cyan")
+    table.add_column("Model ID", style="highlight")
     table.add_column("Family")
     table.add_column("Use case")
-    table.add_column("Thinking", style="green")
-    table.add_column("Streaming", style="blue")
+    table.add_column("Thinking", style="success")
+    table.add_column("Streaming", style="info")
     for model in config.models.values():
         thinking = (
             f"{model.thinking_budget_tokens:,}" if model.thinking_budget_tokens > 0 else "-"
@@ -303,7 +342,8 @@ def print_models(config: AppConfig, session: ChatSession) -> bool:
 
 def print_current_model(session: ChatSession) -> bool:
     """Print the currently active model ID."""
-    console.print(f"Current model: [cyan]{session.active_model}[/]")
+    console.print("Current model: ", end="")
+    console.print(session.active_model, style="highlight")
     return True
 
 
@@ -474,6 +514,48 @@ def disable_streaming(session: ChatSession) -> bool:
     return True
 
 
+def show_theme_status(session: ChatSession) -> bool:
+    """Display the current theme name."""
+    console.print(f"Current theme: [highlight]{session.theme_name}[/]")
+    return True
+
+
+def list_themes() -> bool:
+    """List all available themes, marking the current one."""
+    current = console.width  # not used, placeholder
+    table = Table(title="Available Themes", style="table.border", header_style="table.header")
+    table.add_column("Theme", style="highlight")
+    for name in available_themes():
+        table.add_row(name)
+    console.print(table)
+    console.print("\n[dim]Use /theme set <name> to switch.[/]")
+    return True
+
+
+def set_theme_cmd(raw: str, session: ChatSession) -> bool:
+    """Parse '/theme set <name>' and switch the UI theme."""
+    parts = raw.split(maxsplit=2)
+    if len(parts) < 3:
+        console.print(
+            f"[yellow]Usage:[/] /theme set <{' | '.join(available_themes())}>"
+        )
+        return True
+    name = parts[2].strip().lower()
+    try:
+        session.set_theme(name)
+    except Exception:
+        available = ", ".join(available_themes())
+        console.print(f"[red]Unknown theme `{name}`. Available: {available}[/]")
+        return True
+    apply_theme(session.theme_name)
+    available = ", ".join(available_themes())
+    console.print(
+        f"Theme switched to [highlight]{session.theme_name}[/]. "
+        f"Available: {available}"
+    )
+    return True
+
+
 async def print_history(session: ChatSession, store: ChatStore) -> bool:
     """Fetch and display all persisted messages for the current conversation."""
     messages = await store.list_messages(session.conversation_id)
@@ -498,8 +580,8 @@ async def print_request(raw: str, store: ChatStore) -> bool:
         console.print(f"[yellow]No request found for:[/] {parts[1]}")
         return True
 
-    table = Table(title="LLM Request")
-    table.add_column("Field", style="cyan")
+    table = Table(title="LLM Request", style="table.border", header_style="table.header")
+    table.add_column("Field", style="highlight")
     table.add_column("Value")
     for key, value in request_to_rows(request):
         table.add_row(key, "" if value is None else str(value))
@@ -516,8 +598,8 @@ def clear_history(session: ChatSession) -> bool:
 
 def print_config(config: AppConfig) -> bool:
     """Render a table of the current sanitized runtime configuration."""
-    table = Table(title="Runtime Config")
-    table.add_column("Setting", style="cyan")
+    table = Table(title="Runtime Config", style="table.border", header_style="table.header")
+    table.add_column("Setting", style="highlight")
     table.add_column("Value")
     for key, value in sanitized_config(config).items():
         table.add_row(key, str(value))

@@ -24,12 +24,14 @@ class ChatSession:
     thinking_enabled: bool = field(init=False)
     thinking_budget_tokens: int = field(init=False)
     streaming_enabled: bool = field(init=False)
+    theme_name: str = field(init=False)
 
     def __post_init__(self) -> None:
         self.active_model = self.config.default_model
         self.thinking_enabled = self.config.thinking_enabled
         self.thinking_budget_tokens = self.config.thinking_budget_tokens
         self.streaming_enabled = self.config.streaming_enabled
+        self.theme_name = self.config.theme
 
     def set_model(self, model_id: str) -> None:
         """Switch the active model, validating it exists in config first."""
@@ -101,6 +103,21 @@ class ChatSession:
         if model_config is None:
             return False
         return model_config.streaming_capable
+
+    def set_theme(self, name: str) -> None:
+        """Switch the UI theme."""
+        from ai_chatbot.themes import resolve_theme_name
+
+        previous = self.theme_name
+        self.theme_name = resolve_theme_name(name)
+        logger.info(
+            "theme_changed",
+            extra={
+                "conversation_id": self.conversation_id,
+                "theme": self.theme_name,
+                "previous": previous,
+            },
+        )
 
     def clear(self) -> None:
         """Drop all in-memory message history."""
